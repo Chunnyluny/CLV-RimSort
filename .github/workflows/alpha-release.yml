@@ -182,7 +182,7 @@ jobs:
         shell: powershell
       # Upload ZIP as artifact
       - name: Upload ZIP as artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: ${{ env.FILENAME }}
           path: ./dist/${{ env.FILENAME }}
