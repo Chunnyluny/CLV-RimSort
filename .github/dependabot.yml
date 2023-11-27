@@ -1,0 +1,36 @@
+updates:
+  # Maintain dependencies for Docker
+  - directory: /
+    package-ecosystem: docker
+    schedule:
+      day: monday
+      interval: weekly
+
+  # Maintain dependencies for Composer
+  - directory: /
+    package-ecosystem: composer
+    schedule:
+      day: monday
+      interval: weekly
+
+  # Maintain dependencies for npm
+  - directory: /
+    package-ecosystem: npm
+    schedule:
+      day: monday
+      interval: weekly
+
+  # Maintain dependencies for github-action
+  - directory: /
+    package-ecosystem: github-actions
+    schedule:
+      day: monday
+      interval: weekly
+  
+  # Maintain dependencies for pip
+  - directory: /
+    package-ecosystem: pip
+    schedule:
+      day: monday
+      interval: weekly
+version: 2
