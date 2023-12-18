@@ -229,7 +229,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.TWSTA_ACTIONS }}
       # Download artifacts
       - name: Download all workflow run artifacts
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
       # Upload artifacts to release
       - name: Upload assets to the Edge release
         run: |
