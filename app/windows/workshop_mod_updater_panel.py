@@ -1,5 +1,4 @@
 from functools import partial
-from loguru import logger
 from time import localtime, strftime
 from typing import Any, Dict
 
@@ -16,6 +15,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QVBoxLayout,
 )
+from loguru import logger
 
 
 class ModUpdaterPrompt(QWidget):
@@ -112,11 +112,14 @@ class ModUpdaterPrompt(QWidget):
                 self._update_mods_from_table,
             )
         )
+        self.editor_update_all_button = QPushButton("Update all")
+        self.editor_update_all_button.clicked.connect(partial(self._update_all))
         self.editor_actions_layout.addWidget(self.editor_deselect_all_button)
         self.editor_actions_layout.addWidget(self.editor_select_all_button)
         self.editor_actions_layout.addStretch(100)
         self.editor_actions_layout.addWidget(self.editor_cancel_button)
         self.editor_actions_layout.addWidget(self.editor_update_mods_button)
+        self.editor_actions_layout.addWidget(self.editor_update_all_button)
 
         # Build the details layout
         self.details_layout.addWidget(self.details_label)
@@ -211,6 +214,10 @@ class ModUpdaterPrompt(QWidget):
                 ]
             )
         self.close()
+
+    def _update_all(self) -> None:
+        self._deselect_select_all_rows(True)
+        self._update_mods_from_table()
 
     def _populate_from_metadata(self) -> None:
         # Check our metadata for available updates, append row if found by data source
