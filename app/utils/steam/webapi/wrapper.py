@@ -1,23 +1,22 @@
+import sys
+import traceback
 from logging import getLogger, WARNING
-from loguru import logger
 from math import ceil
 from multiprocessing import cpu_count, Pool
-from requests import post as requests_post
-from requests.exceptions import JSONDecodeError
-import sys
 from time import time
-import traceback
 from typing import Any, Dict, Optional, Tuple
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QDialog, QLineEdit, QMessageBox, QPushButton, QVBoxLayout
+from loguru import logger
+from requests import post as requests_post
+from requests.exceptions import JSONDecodeError
 from steam.webapi import WebAPI
 
 from app.utils.app_info import AppInfo
 from app.utils.constants import RIMWORLD_DLC_METADATA
 from app.utils.generic import chunks
 from app.utils.steam.steamworks.wrapper import SteamworksAppDependenciesQuery
-
 
 # This is redundant since it is also done in `logger-tt` config,
 # however, it can't hurt, just in case!
@@ -336,6 +335,7 @@ class DynamicQuery(QObject):
                 appid=self.appid,
                 strip_description_bbcode=False,
                 includereactions=False,
+                admin_query=False,
             )
             for metadata in response["response"]["publishedfiledetails"]:
                 publishedfileid = metadata[
@@ -482,6 +482,7 @@ class DynamicQuery(QObject):
             return_playtime_stats=False,
             return_details=False,
             strip_description_bbcode=False,
+            admin_query=False,
         )
         # Print total mods found we need to iter through paginations to get info for
         if (

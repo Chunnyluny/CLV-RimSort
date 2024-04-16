@@ -1,5 +1,4 @@
 import json
-from loguru import logger
 import os
 from pathlib import Path
 from typing import Any, Dict
@@ -7,11 +6,11 @@ from typing import Any, Dict
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout
+from loguru import logger
 
-from app.utils.app_info import AppInfo
 from app.models.image_label import ImageLabel
 from app.models.scroll_label import ScrollLabel
-from app.utils.generic import set_to_list
+from app.utils.app_info import AppInfo
 
 
 class ModInfo:
@@ -40,6 +39,7 @@ class ModInfo:
         self.mod_info_package_id = QHBoxLayout()
         self.mod_info_authors = QHBoxLayout()
         self.mod_info_mod_version = QHBoxLayout()
+        self.mod_info_supported_versions = QHBoxLayout()
         self.mod_info_path = QHBoxLayout()
         self.description_layout = QHBoxLayout()
 
@@ -105,6 +105,10 @@ class ModInfo:
             Qt.TextSelectableByMouse
         )
         self.mod_info_mod_version_value.setWordWrap(True)
+        self.mod_info_supported_versions_label = QLabel("Supported Version:")
+        self.mod_info_supported_versions_label.setObjectName("summaryLabel")
+        self.mod_info_supported_versions_value = QLabel()
+        self.mod_info_supported_versions_value.setObjectName("summaryValue")
         self.mod_info_path_label = QLabel("Path:")
         self.mod_info_path_label.setObjectName("summaryLabel")
         self.mod_info_path_value = QLabel()
@@ -127,11 +131,18 @@ class ModInfo:
         self.mod_info_authors.addWidget(self.mod_info_author_value, 80)
         self.mod_info_mod_version.addWidget(self.mod_info_mod_version_label, 20)
         self.mod_info_mod_version.addWidget(self.mod_info_mod_version_value, 80)
+        self.mod_info_supported_versions.addWidget(
+            self.mod_info_supported_versions_label, 20
+        )
+        self.mod_info_supported_versions.addWidget(
+            self.mod_info_supported_versions_value, 80
+        )
         self.mod_info_layout.addLayout(self.mod_info_name)
         self.mod_info_layout.addLayout(self.scenario_info_summary)
         self.mod_info_layout.addLayout(self.mod_info_package_id)
         self.mod_info_layout.addLayout(self.mod_info_authors)
         self.mod_info_layout.addLayout(self.mod_info_mod_version)
+        self.mod_info_layout.addLayout(self.mod_info_supported_versions)
         self.mod_info_layout.addLayout(self.mod_info_path)
         self.description_layout.addWidget(self.description)
 
@@ -150,6 +161,8 @@ class ModInfo:
         self.mod_info_author_value.hide()
         self.mod_info_mod_version_label.hide()
         self.mod_info_mod_version_value.hide()
+        self.mod_info_supported_versions_label.hide()
+        self.mod_info_supported_versions_value.hide()
         self.mod_info_path_label.hide()
         self.mod_info_path_value.hide()
         self.scenario_info_summary_label.hide()
@@ -165,16 +178,12 @@ class ModInfo:
 
         :param mod_info: complete json info for the mod
         """
-
-        mod_info = set_to_list(mod_info)
-        mod_info_pretty = json.dumps(mod_info, indent=4)
-        logger.debug(f"Starting display of mod info: {mod_info_pretty}")
+        # Set name value
         self.mod_info_name_value.setText(mod_info.get("name", "Not specified"))
-
+        # Show essential info widgets
         for widget in self.essential_info_widgets:
             if not widget.isVisible():
                 widget.show()
-
         # If it's not invalid, and it's not a scenario, it must be a mod!
         if not mod_info.get("invalid") and not mod_info.get("scenario"):
             # Show valid-mod-specific fields, hide scenario summary
@@ -184,27 +193,50 @@ class ModInfo:
             self.mod_info_author_value.show()
             self.mod_info_mod_version_label.show()
             self.mod_info_mod_version_value.show()
+            self.mod_info_supported_versions_label.show()
+            self.mod_info_supported_versions_value.show()
             self.scenario_info_summary_label.hide()
             self.scenario_info_summary_value.hide()
+
             # Populate values from metadata
+
+            # Set package ID
             self.mod_info_package_id_value.setText(
                 mod_info.get("packageid", "Not specified")
             )
+
+            # Set authors
             authors_tag = mod_info.get("authors", "Not specified")
-            if authors_tag and isinstance(authors_tag, dict) and authors_tag.get("li"):
+            if isinstance(authors_tag, dict) and authors_tag.get("li"):
                 list_of_authors = authors_tag["li"]
                 authors_text = ", ".join(list_of_authors)
                 self.mod_info_author_value.setText(authors_text)
             else:
                 self.mod_info_author_value.setText(
-                    f"{authors_tag if authors_tag else 'Not specified'}"
+                    authors_tag if authors_tag else "Not specified"
                 )
-            if isinstance(mod_info.get("modversion"), str):
-                self.mod_info_mod_version_value.setText(mod_info.get("modversion"))
-            elif isinstance(mod_info.get("modversion"), dict):
-                self.mod_info_mod_version_value.setText(mod_info["modversion"]["#text"])
+
+            # Set mod version
+            mod_version = mod_info.get("modversion", {})
+            if isinstance(mod_version, dict):
+                self.mod_info_mod_version_value.setText(
+                    mod_version.get("#text", "Not specified")
+                )
             else:
-                self.mod_info_mod_version_value.setText("Not specified")
+                self.mod_info_mod_version_value.setText(mod_version)
+
+            # Set supported versions
+            supported_versions_tag = mod_info.get("supportedversions", {})
+            supported_versions_list = supported_versions_tag.get("li")
+            if isinstance(supported_versions_list, list):
+                supported_versions_text = ", ".join(supported_versions_list)
+                self.mod_info_supported_versions_value.setText(supported_versions_text)
+            else:
+                self.mod_info_supported_versions_value.setText(
+                    supported_versions_list
+                    if supported_versions_list
+                    else "Not specified"
+                )
         elif mod_info.get("scenario"):  # Hide mod-specific widgets, show scenario
             self.mod_info_package_id_label.hide()
             self.mod_info_package_id_value.hide()
@@ -212,6 +244,8 @@ class ModInfo:
             self.mod_info_author_value.hide()
             self.mod_info_mod_version_label.hide()
             self.mod_info_mod_version_value.hide()
+            self.mod_info_supported_versions_label.hide()
+            self.mod_info_supported_versions_value.hide()
             self.scenario_info_summary_label.show()
             self.scenario_info_summary_value.show()
             self.scenario_info_summary_value.setText(
@@ -224,10 +258,11 @@ class ModInfo:
             self.mod_info_author_value.hide()
             self.mod_info_mod_version_label.hide()
             self.mod_info_mod_version_value.hide()
+            self.mod_info_supported_versions_label.hide()
+            self.mod_info_supported_versions_value.hide()
             self.scenario_info_summary_label.hide()
             self.scenario_info_summary_value.hide()
         self.mod_info_path_value.setText(mod_info.get("path"))
-
         # Set the scrolling description for the Mod Info Panel
         self.description.setText("")
         if "description" in mod_info:
@@ -248,7 +283,7 @@ class ModInfo:
         else:
             # Get Preview.png
             workshop_folder_path = mod_info["path"]
-            logger.info(
+            logger.debug(
                 f"Retrieved mod path to parse preview image: {workshop_folder_path}"
             )
             if os.path.exists(workshop_folder_path):
@@ -282,7 +317,7 @@ class ModInfo:
                             break
                     # If there was an issue getting the expected path, track and exit
                     if invalid_folder_path_found or invalid_file_path_found:
-                        logger.info("No preview image found for the mod")
+                        logger.debug("No preview image found for the mod")
                         pixmap = QPixmap(self.missing_image_path)
                         self.preview_picture.setPixmap(
                             pixmap.scaled(
@@ -290,7 +325,7 @@ class ModInfo:
                             )
                         )
                     else:
-                        logger.info("Preview image found")
+                        logger.debug("Preview image found")
                         image_path = str(
                             (
                                 Path(workshop_folder_path)

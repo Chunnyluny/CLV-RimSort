@@ -4,7 +4,6 @@ import sys
 import traceback
 from logging import getLogger, WARNING
 from multiprocessing import freeze_support, set_start_method
-from pathlib import Path
 from types import TracebackType
 from typing import Type, Optional
 
@@ -167,7 +166,7 @@ if __name__ == "__main__":
         colorize=False,
     )
 
-    if not "__compiled__" in globals():
+    if "__compiled__" not in globals():
         logger.debug("Running using Python interpreter")
     else:
         # Configure QtWebEngine locales path

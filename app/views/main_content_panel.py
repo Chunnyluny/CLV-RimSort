@@ -1,35 +1,16 @@
-from functools import partial
-from gc import collect
-from pathlib import Path
+import datetime
 import platform
-from typing import Callable
 import subprocess
 import sys
-import datetime
+import webbrowser
+from functools import partial
 from io import BytesIO
 from math import ceil
 from multiprocessing import cpu_count, Pool
-from requests import get as requests_get
 from tempfile import gettempdir
-import webbrowser
+from typing import Callable
 from zipfile import ZipFile
 
-from loguru import logger
-
-# GitPython depends on git executable being available in PATH
-try:
-    from git import Repo
-    from git.exc import GitCommandError
-
-    GIT_EXISTS = True
-except ImportError:
-    logger.warning(
-        "git not detected in your PATH! Do you have git installed...? git integration will be disabled!"
-    )
-    GIT_EXISTS = False
-
-from github import Github
-from pyperclip import copy as copy_to_clipboard
 from PySide6.QtCore import QEventLoop, QProcess, Qt, Slot
 from PySide6.QtWidgets import (
     QApplication,
@@ -38,16 +19,22 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
 )
+from github import Github
+from pygit2 import (
+    Repository,
+    RemoteCallbacks,
+    GitError,
+    init_repository,
+    clone_repository,
+)
+from pyperclip import copy as copy_to_clipboard
+from requests import get as requests_get
 
-from app.models.dialogue import show_dialogue_input, show_information, show_fatal_error
 from app.models.animations import LoadingAnimation
-from app.sort.dependencies import *
+from app.models.dialogue import show_dialogue_input, show_information, show_fatal_error
 from app.sort.alphabetical_sort import *
+from app.sort.dependencies import *
 from app.sort.topo_sort import *
-from app.views.actions_panel import Actions
-from app.views.mods_panel import ModsPanel
-from app.views.mod_info_panel import ModInfo
-from app.utils.app_info import AppInfo
 from app.utils.event_bus import EventBus
 from app.utils.generic import (
     chunks,
@@ -68,7 +55,10 @@ from app.utils.steam.steamworks.wrapper import (
 from app.utils.steam.webapi.wrapper import CollectionImport
 from app.utils.todds.wrapper import ToddsInterface
 from app.utils.xml import json_to_xml_write, xml_path_to_json
+from app.views.actions_panel import Actions
 from app.views.game_configuration_panel import GameConfiguration
+from app.views.mod_info_panel import ModInfo
+from app.views.mods_panel import ModsPanel, ModsPanelSortKey
 from app.windows.missing_mods_panel import MissingModsPrompt
 from app.windows.rule_editor_panel import RuleEditor
 from app.windows.runner_panel import RunnerPanel
@@ -86,6 +76,7 @@ class MainContent(QObject):
 
     _instance: Optional["MainContent"] = None
 
+    disable_enable_widgets_signal = Signal(bool)
     status_signal = Signal(str)
     stop_watchdog_signal = Signal()
 
@@ -129,7 +120,11 @@ class MainContent(QObject):
             EventBus().do_download_steam_workshop_db_from_github.connect(
                 self._on_do_download_steam_workshop_db_from_github
             )
-            EventBus().do_upload_log.connect(self._on_do_upload_log)
+            EventBus().do_upload_rimsort_log.connect(self._on_do_upload_rimsort_log)
+            EventBus().do_upload_rimsort_old_log.connect(
+                self._on_do_upload_rimsort_old_log
+            )
+            EventBus().do_upload_rimworld_log.connect(self._on_do_upload_rimworld_log)
             EventBus().do_download_all_mods_via_steamcmd.connect(
                 self._on_do_download_all_mods_via_steamcmd
             )
@@ -221,9 +216,6 @@ class MainContent(QObject):
             self.mods_panel.inactive_mods_list.item_added_signal.connect(
                 self.mods_panel.active_mods_list.handle_other_list_row_added
             )
-            self.mods_panel.active_mods_list.recalculate_warnings_signal.connect(
-                self.mods_panel.recalculate_active_mods
-            )
             self.mods_panel.active_mods_list.edit_rules_signal.connect(
                 self._do_open_rule_editor
             )
@@ -307,7 +299,9 @@ class MainContent(QObject):
             iml.setFocus()
             if not iml.selectedIndexes():
                 iml.setCurrentRow(self.___get_relative_middle(iml))
-            self.__mod_list_slot(iml.selectedItems()[0].data(Qt.UserRole))
+            data = iml.selectedItems()[0].data(Qt.UserRole)
+            uuid = data["uuid"]
+            self.__mod_list_slot(uuid)
 
         elif key == "Return" or key == "Space" or key == "DoubleClick":
             # TODO: graphical bug where if you hold down the key, items are
@@ -319,7 +313,9 @@ class MainContent(QObject):
 
                 # Remove items from current list
                 for item in items_to_move:
-                    aml.uuids.remove(item.data(Qt.UserRole))
+                    data = item.data(Qt.UserRole)
+                    uuid = data["uuid"]
+                    aml.uuids.remove(uuid)
                     aml.takeItem(aml.row(item))
                 if aml.count():
                     if aml.count() == first_selected:
@@ -335,9 +331,8 @@ class MainContent(QObject):
                 for item in items_to_move:
                     iml.insertItem(count, item)
                     count += 1
-
-                # If the other list is the active mod list, recalculate errors
-                self.mods_panel.recalculate_active_mods()
+            self.mods_panel.active_mods_list.recalculate_warnings_signal.emit()
+            self.mods_panel.inactive_mods_list.recalculate_warnings_signal.emit()
 
     def __handle_inactive_mod_key_press(self, key) -> None:
         """
@@ -358,7 +353,9 @@ class MainContent(QObject):
             aml.setFocus()
             if not aml.selectedIndexes():
                 aml.setCurrentRow(self.___get_relative_middle(aml))
-            self.__mod_list_slot(aml.selectedItems()[0].data(Qt.UserRole))
+            data = aml.selectedItems()[0].data(Qt.UserRole)
+            uuid = data["uuid"]
+            self.__mod_list_slot(uuid)
 
         elif key == "Return" or key == "Space" or key == "DoubleClick":
             # TODO: graphical bug where if you hold down the key, items are
@@ -370,7 +367,9 @@ class MainContent(QObject):
 
                 # Remove items from current list
                 for item in items_to_move:
-                    iml.uuids.remove(item.data(Qt.UserRole))
+                    data = item.data(Qt.UserRole)
+                    uuid = data["uuid"]
+                    iml.uuids.remove(uuid)
                     iml.takeItem(iml.row(item))
                 if iml.count():
                     if iml.count() == first_selected:
@@ -386,9 +385,8 @@ class MainContent(QObject):
                 for item in items_to_move:
                     aml.insertItem(count, item)
                     count += 1
-
-                # If the other list is the active mod list, recalculate errors
-                self.mods_panel.recalculate_active_mods()
+            self.mods_panel.active_mods_list.recalculate_warnings_signal.emit()
+            self.mods_panel.inactive_mods_list.recalculate_warnings_signal.emit()
 
     def __insert_data_into_lists(
         self, active_mods_uuids: List[str], inactive_mods_uuids: List[str]
@@ -405,13 +403,17 @@ class MainContent(QObject):
         self.mods_panel.active_mods_list.recreate_mod_list(
             list_type="active", uuids=active_mods_uuids
         )
-        self.mods_panel.inactive_mods_list.recreate_mod_list(
-            list_type="inactive", uuids=inactive_mods_uuids
+        self.mods_panel.inactive_mods_list.recreate_mod_list_and_sort(
+            list_type="inactive",
+            uuids=inactive_mods_uuids,
+            key=ModsPanelSortKey.MODNAME,
         )
-
         logger.info(
             f"Finished inserting mod data into active [{len(active_mods_uuids)}] and inactive [{len(inactive_mods_uuids)}] mod lists"
         )
+        # Recalculate warnings for both lists
+        self.mods_panel.active_mods_list.recalculate_warnings_signal.emit()
+        self.mods_panel.inactive_mods_list.recalculate_warnings_signal.emit()
 
     def __duplicate_mods_prompt(self) -> None:
         list_of_duplicate_mods = "\n".join(
@@ -467,60 +469,35 @@ class MainContent(QObject):
         complete json mod info for that internal uuid. It passes
         this information to the mod info panel to display.
 
+        It updates the styling of the summary values based
+        on the validity of the mod, and will highlight red if invalid.
+
         :param uuid: uuid of mod
         """
-        logger.info(f"USER ACTION: clicked on a mod list item: {uuid}")
-        if uuid in self.metadata_manager.internal_local_metadata.keys():
-            self.mod_info_panel.display_mod_info(
-                self.metadata_manager.internal_local_metadata[uuid]
-            )
-            if self.metadata_manager.internal_local_metadata[uuid].get("invalid"):
-                # Set invalid value style
-                self.mod_info_panel.mod_info_name_value.setObjectName(
-                    "summaryValueInvalid"
-                )
-                self.mod_info_panel.mod_info_path_value.setObjectName(
-                    "summaryValueInvalid"
-                )
-                self.mod_info_panel.mod_info_author_value.setObjectName(
-                    "summaryValueInvalid"
-                )
-                self.mod_info_panel.mod_info_package_id_value.setObjectName(
-                    "summaryValueInvalid"
-                )
-            else:
-                # Set valid value style
-                self.mod_info_panel.mod_info_name_value.setObjectName("summaryValue")
-                self.mod_info_panel.mod_info_path_value.setObjectName("summaryValue")
-                self.mod_info_panel.mod_info_author_value.setObjectName("summaryValue")
-                self.mod_info_panel.mod_info_package_id_value.setObjectName(
-                    "summaryValue"
-                )
-            # Polish and unpolish to reload styling from the .qss file
-            self.mod_info_panel.mod_info_name_value.style().unpolish(
-                self.mod_info_panel.mod_info_name_value
-            )
-            self.mod_info_panel.mod_info_name_value.style().polish(
-                self.mod_info_panel.mod_info_name_value
-            )
-            self.mod_info_panel.mod_info_name_value.style().unpolish(
-                self.mod_info_panel.mod_info_path_value
-            )
-            self.mod_info_panel.mod_info_name_value.style().polish(
-                self.mod_info_panel.mod_info_path_value
-            )
-            self.mod_info_panel.mod_info_name_value.style().unpolish(
-                self.mod_info_panel.mod_info_author_value
-            )
-            self.mod_info_panel.mod_info_name_value.style().polish(
-                self.mod_info_panel.mod_info_author_value
-            )
-            self.mod_info_panel.mod_info_name_value.style().unpolish(
-                self.mod_info_panel.mod_info_package_id_value
-            )
-            self.mod_info_panel.mod_info_name_value.style().polish(
-                self.mod_info_panel.mod_info_package_id_value
-            )
+        mod_info = self.metadata_manager.internal_local_metadata.get(uuid)
+        self.mod_info_panel.display_mod_info(mod_info=mod_info)
+        if mod_info and mod_info.get("invalid"):
+            # Set invalid value style
+            for widget in (
+                self.mod_info_panel.mod_info_name_value,
+                self.mod_info_panel.mod_info_path_value,
+                self.mod_info_panel.mod_info_author_value,
+                self.mod_info_panel.mod_info_package_id_value,
+            ):
+                widget.setObjectName("summaryValueInvalid")
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
+        else:
+            # Set valid value style
+            for widget in (
+                self.mod_info_panel.mod_info_name_value,
+                self.mod_info_panel.mod_info_path_value,
+                self.mod_info_panel.mod_info_author_value,
+                self.mod_info_panel.mod_info_package_id_value,
+            ):
+                widget.setObjectName("summaryValue")
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
 
     def __update_game_configuration(self) -> None:
         self.metadata_manager.community_rules_repo = (
@@ -671,10 +648,6 @@ class MainContent(QObject):
             self._do_export_list_clipboard()
         if action == "upload_list_rentry":
             self._do_upload_list_rentry()
-        if action == "upload_rs_log":
-            self._upload_rs_log()
-        if action == "upload_rs_old_log":
-            self._upload_rs_old_log()
         if action == "save":
             self._do_save()
         if action == "run":
@@ -691,8 +664,6 @@ class MainContent(QObject):
             self._do_edit_run_args()
 
         # settings panel actions
-        if action == "upload_rw_log":
-            self._do_upload_rw_log()
         if action == "configure_github_identity":
             self._do_configure_github_identity()
         if action == "configure_steam_database_path":
@@ -700,43 +671,31 @@ class MainContent(QObject):
         if action == "configure_steam_database_repo":
             self._do_configure_steam_database_repo()
         if action == "download_steam_database":
-            if GIT_EXISTS:
-                self._do_clone_repo_to_path(
-                    base_path=str(AppInfo().databases_folder),
-                    repo_url=self.settings_controller.settings.external_steam_metadata_repo,
-                )
-            else:
-                self._do_notify_no_git()
+            self._do_clone_repo_to_path(
+                base_path=str(AppInfo().databases_folder),
+                repo_url=self.settings_controller.settings.external_steam_metadata_repo,
+            )
         if action == "upload_steam_database":
-            if GIT_EXISTS:
-                self._do_upload_db_to_repo(
-                    repo_url=self.settings_controller.settings.external_steam_metadata_repo,
-                    file_name="steamDB.json",
-                )
-            else:
-                self._do_notify_no_git()
+            self._do_upload_db_to_repo(
+                repo_url=self.settings_controller.settings.external_steam_metadata_repo,
+                file_name="steamDB.json",
+            )
         if action == "configure_community_rules_db_path":
             self._do_configure_community_rules_db_file_path()
         if action == "configure_community_rules_db_repo":
             self._do_configure_community_rules_db_repo()
         if action == "download_community_rules_database":
-            if GIT_EXISTS:
-                self._do_clone_repo_to_path(
-                    base_path=str(AppInfo().databases_folder),
-                    repo_url=self.settings_controller.settings.external_community_rules_repo,
-                )
-            else:
-                self._do_notify_no_git()
+            self._do_clone_repo_to_path(
+                base_path=str(AppInfo().databases_folder),
+                repo_url=self.settings_controller.settings.external_community_rules_repo,
+            )
         if action == "open_community_rules_with_rule_editor":
             self._do_open_rule_editor(compact=False, initial_mode="community_rules")
         if action == "upload_community_rules_database":
-            if GIT_EXISTS:
-                self._do_upload_db_to_repo(
-                    repo_url=self.settings_controller.settings.external_community_rules_repo,
-                    file_name="communityRules.json",
-                )
-            else:
-                self._do_notify_no_git()
+            self._do_upload_db_to_repo(
+                repo_url=self.settings_controller.settings.external_community_rules_repo,
+                file_name="communityRules.json",
+            )
         if action == "build_steam_database_thread":
             self._do_build_database_thread()
         if "download_entire_workshop" in action:
@@ -756,7 +715,7 @@ class MainContent(QObject):
         logger.debug("Skipping update check...")
         return
         # NOT NUITKA
-        if not "__compiled__" in globals():
+        if "__compiled__" not in globals():
             logger.debug(
                 "You are running from Python interpreter. Skipping update check..."
             )
@@ -950,9 +909,8 @@ class MainContent(QObject):
         loading_animation_text_label = None
         # Hide the info panel widgets
         self.mod_info_panel.info_panel_frame.hide()
-        # Disable widgets
-        for widget in QApplication.instance().allWidgets():
-            widget.setEnabled(False)
+        # Disable widgets while loading
+        self.disable_enable_widgets_signal.emit(False)
         # Encapsulate mod parsing inside a nice lil animation
         loading_animation = LoadingAnimation(
             gif_path=gif_path,
@@ -973,9 +931,8 @@ class MainContent(QObject):
         if text:
             self.mod_info_panel.panel.removeWidget(loading_animation_text_label)
             loading_animation_text_label.close()
-        # Enable widgets
-        for widget in QApplication.instance().allWidgets():
-            widget.setEnabled(True)
+        # Enable widgets again after loading
+        self.disable_enable_widgets_signal.emit(True)
         # Show the info panel widgets
         self.mod_info_panel.info_panel_frame.show()
         logger.debug(f"Returning {type(data)}")
@@ -1121,7 +1078,12 @@ class MainContent(QObject):
             for uuid in self.metadata_manager.internal_local_metadata.keys()
             if uuid not in active_mods_uuids
         )
+        # Disable widgets while inserting
+        self.disable_enable_widgets_signal.emit(False)
+        # Insert data into lists
         self.__insert_data_into_lists(active_mods_uuids, inactive_mods_uuids)
+        # Re-enable widgets after inserting
+        self.disable_enable_widgets_signal.emit(True)
 
     def _do_sort(self) -> None:
         """
@@ -1223,6 +1185,9 @@ class MainContent(QObject):
             combined_mods[uuid] = self.metadata_manager.internal_local_metadata[uuid]
 
         logger.info("Finished combining all tiers of mods. Inserting into mod lists!")
+        # Disable widgets while inserting
+        self.disable_enable_widgets_signal.emit(False)
+        # Insert data into lists
         self.__insert_data_into_lists(
             combined_mods,
             {
@@ -1236,6 +1201,8 @@ class MainContent(QObject):
                 )
             },
         )
+        # Enable widgets again after inserting
+        self.disable_enable_widgets_signal.emit(True)
 
     def _do_import_list_file_xml(self) -> None:
         """
@@ -1672,7 +1639,32 @@ class MainContent(QObject):
                 text="Failed to upload exported active mod list to Rentry.co",
             )
 
-    def _do_upload_rw_log(self):
+    @Slot()
+    def _on_do_upload_rimsort_log(self) -> None:
+        ret = upload_data_to_0x0_st(str(AppInfo().user_log_folder / "RimSort.log"))
+        if ret:
+            copy_to_clipboard(ret)
+            show_information(
+                title="Uploaded file",
+                text=f"Uploaded RimSort log to http://0x0.st/",
+                information=f"The URL has been copied to your clipboard:\n\n{ret}",
+            )
+            webbrowser.open(ret)
+
+    @Slot()
+    def _on_do_upload_rimsort_old_log(self) -> None:
+        ret = upload_data_to_0x0_st(str(AppInfo().user_log_folder / "RimSort.old.log"))
+        if ret:
+            copy_to_clipboard(ret)
+            show_information(
+                title="Uploaded file",
+                text=f"Uploaded RimSort log to http://0x0.st/",
+                information=f"The URL has been copied to your clipboard:\n\n{ret}",
+            )
+            webbrowser.open(ret)
+
+    @Slot()
+    def _on_do_upload_rimworld_log(self):
         player_log_path = str(
             (
                 Path(self.settings_controller.settings.config_folder).parent
@@ -1688,26 +1680,7 @@ class MainContent(QObject):
                     text=f"Uploaded RimWorld log to http://0x0.st/",
                     information=f"The URL has been copied to your clipboard:\n\n{ret}",
                 )
-
-    def _upload_rs_log(self):
-        ret = upload_data_to_0x0_st(str((Path(gettempdir()) / "RimSort.log")))
-        if ret:
-            copy_to_clipboard(ret)
-            show_information(
-                title="Uploaded file",
-                text=f"Uploaded RimSort.log to http://0x0.st/",
-                information=f"The URL has been copied to your clipboard:\n\n{ret}",
-            )
-
-    def _upload_rs_old_log(self):
-        ret = upload_data_to_0x0_st(str((Path(gettempdir()) / "RimSort.old.log")))
-        if ret:
-            copy_to_clipboard(ret)
-            show_information(
-                title="Uploaded file",
-                text=f"Uploaded RimSort.old.log to http://0x0.st/",
-                information=f"The URL has been copied to your clipboard:\n\n{ret}",
-            )
+                webbrowser.open(ret)
 
     def _do_save(self) -> None:
         """
@@ -1788,7 +1761,7 @@ class MainContent(QObject):
         """
         if (
             self.active_mods_uuids_restore_state
-            and self.active_mods_uuids_restore_state
+            and self.inactive_mods_uuids_restore_state
         ):
             self.mods_panel.signal_clear_search("Active")
             self.mods_panel.active_mods_filter_data_source_index = len(
@@ -1803,10 +1776,15 @@ class MainContent(QObject):
             logger.info(
                 f"Restoring cached mod lists with active list [{len(self.active_mods_uuids_restore_state)}] and inactive list [{len(self.inactive_mods_uuids_restore_state)}]"
             )
+            # Disable widgets while inserting
+            self.disable_enable_widgets_signal.emit(False)
+            # Insert items into lists
             self.__insert_data_into_lists(
                 self.active_mods_uuids_restore_state,
                 self.inactive_mods_uuids_restore_state,
             )
+            # Reenable widgets after inserting
+            self.disable_enable_widgets_signal.emit(True)
         else:
             logger.warning(
                 "Cached mod lists for restore function not set as client started improperly. Passing on restore"
@@ -2161,22 +2139,22 @@ class MainContent(QObject):
             logger.debug("Cancelling operation.")
 
     def _do_re_git(self, repo_paths: list) -> None:
-        if GIT_EXISTS:
-            for path in repo_paths:
-                try:
-                    repo = Repo(path)
-                    origin_url = repo.remote("origin").url
-                except Exception as e:
-                    show_warning(
-                        title="Unable to open repository",
-                        text="RimSort failed to open the git repository inside this mod. Please re-download the mod.",
-                    )
-                self._do_clone_repo_to_path(
-                    base_path=os.path.split(path)[0], repo_url=origin_url
+        for path in repo_paths:
+            try:
+                repo = Repository(path)
+                remote = repo.remotes["origin"]
+                origin_url = remote.url
+            except Exception as e:
+                show_warning(
+                    title="Unable to open repository",
+                    text="RimSort failed to open the git repository inside this mod. Please re-download the mod.",
                 )
-                self._do_cleanup_gitpython(repo)
-        else:
-            self._do_notify_no_git()
+                continue
+
+            self._do_clone_repo_to_path(
+                base_path=os.path.split(path)[0], repo_url=origin_url
+            )
+            self._do_cleanup_pygit2(repo)
 
     # EXTERNAL METADATA ACTIONS
 
@@ -2209,10 +2187,8 @@ class MainContent(QObject):
             logger.debug("USER ACTION: cancelled input!")
             return
 
-    def _do_cleanup_gitpython(self, repo) -> None:
-        # Cleanup GitPython
-        collect()
-        repo.git.clear_cache()
+    def _do_cleanup_pygit2(self, repo) -> None:
+        # Cleanup Pygit2
         del repo
 
     def _do_clone_repo_to_path(self, base_path: str, repo_url: str) -> None:
@@ -2221,12 +2197,7 @@ class MainContent(QObject):
         Handles possible existing repo, and prompts (re)download of repo
         Otherwise it just clones the repo and notifies user
         """
-        if (
-            repo_url
-            and repo_url != ""
-            and repo_url.startswith("http://")
-            or repo_url.startswith("https://")
-        ):
+        if repo_url and repo_url.startswith(("http://", "https://")):
             # Calculate folder name from provided URL
             repo_folder_name = os.path.split(repo_url)[1]
             # Calculate path from generated folder name
@@ -2247,7 +2218,7 @@ class MainContent(QObject):
                         "Update existing",
                     ],
                 )
-                if answer == "&Cancel":
+                if answer == "Cancel":
                     logger.debug(
                         f"User cancelled prompt. Skipping any {repo_folder_name} repository actions."
                     )
@@ -2263,31 +2234,33 @@ class MainContent(QObject):
             # Clone the repo to storage path and notify user
             logger.info(f"Cloning {repo_url} to: {repo_path}")
             try:
-                Repo.clone_from(repo_url, repo_path)
+                clone_repository(repo_url, repo_path)
                 show_information(
                     title="Repo retrieved",
                     text="The configured repository was cloned!",
                     information=f"{repo_url} ->\n" + f"{repo_path}",
                 )
-            except GitCommandError:
+            except GitError:
                 try:
                     # Initialize a new Git repository
-                    repo = Repo.init(repo_path)
+                    repo = init_repository(repo_path)
                     # Add the origin remote
-                    origin_remote = repo.create_remote("origin", repo_url)
+                    origin_remote = repo.remotes.create("origin", repo_url)
                     # Fetch the remote branches
                     origin_remote.fetch()
                     # Determine the target branch name
                     target_branch = None
-                    for ref in repo.remotes.origin.refs:
-                        if ref.remote_head in ("main", "master"):
-                            target_branch = ref.remote_head
+                    for ref in repo.references:
+                        if ref.name.endswith(
+                            "refs/remotes/origin/main"
+                        ) or ref.name.endswith("refs/remotes/origin/master"):
+                            target_branch = ref.name.split("/")[-1]
                             break
 
                     if target_branch:
                         # Checkout the target branch
-                        repo.git.checkout(
-                            f"origin/{target_branch}", b=target_branch, force=True
+                        repo.checkout(
+                            refname=f"refs/remotes/origin/{target_branch}", force=True
                         )
                     else:
                         # Handle the case when the target branch is not found
@@ -2295,9 +2268,9 @@ class MainContent(QObject):
                     show_information(
                         title="Repo retrieved",
                         text="The configured repository was reinitialized with existing files! (likely leftover .dds textures)",
-                        information=f"{repo_url} ->\n" + f"{repo_path}",
+                        information=f"{repo_url} ->\n{repo_path}",
                     )
-                except GitCommandError:
+                except GitError:
                     stacktrace = traceback.format_exc()
                     show_warning(
                         title="Failed to clone repo!",
@@ -2323,12 +2296,7 @@ class MainContent(QObject):
         Handles possible existing repo, and prompts (re)download of repo
         Otherwise it just clones the repo and notifies user
         """
-        if (
-            repo_url
-            and repo_url != ""
-            and repo_url.startswith("http://")
-            or repo_url.startswith("https://")
-        ):
+        if repo_url and repo_url.startswith(("http://", "https://")):
             # Calculate folder name from provided URL
             repo_folder_name = os.path.split(repo_url)[1]
             # Calculate path from generated folder name
@@ -2338,34 +2306,50 @@ class MainContent(QObject):
                 logger.info(f"Force updating git repository at: {repo_path}")
                 try:
                     # Open repo
-                    repo = Repo(repo_path)
+                    repo = Repository(repo_path)
                     # Determine the target branch name
                     target_branch = None
-                    for ref in repo.remotes.origin.refs:
-                        if ref.remote_head in ("main", "master"):
-                            target_branch = ref.remote_head
+                    for ref in repo.references:
+                        if ref.endswith("refs/remotes/origin/main") or ref.endswith(
+                            "refs/remotes/origin/master"
+                        ):
+                            target_branch = ref.split("/")[-1]
                             break
                     if target_branch:
                         # Checkout the target branch
-                        repo.git.checkout(target_branch)
+                        repo.checkout(f"refs/remotes/origin/{target_branch}")
                     else:
                         # Handle the case when the target branch is not found
                         logger.warning("Target branch not found.")
-                    # Reset the repository to HEAD in case of changes not committed
-                    repo.head.reset(index=True, working_tree=True)
-                    # Perform a pull with rebase
-                    origin = repo.remotes.origin
-                    origin.pull(rebase=True)
+                        # Pull with rebase
+                        remote = repo.remotes["origin"]
+                        callbacks = RemoteCallbacks()
+                        remote.fetch(callbacks=callbacks)
+                        merge_head = repo.lookup_reference(
+                            f"refs/remotes/origin/{target_branch}"
+                        ).target
+                        remote_master = merge_head
+                        repo.merge(merge_head)
+                        merge_commit = repo[merge_head]
+                        merge_summary = merge_commit.message
+                        repo.checkout_tree(repo.get(remote_master).tree)
+                        repo.create_commit(
+                            "HEAD",
+                            repo.default_signature,
+                            repo.default_signature,
+                            f"Merge: {merge_summary}",
+                            repo[remote_master].tree_id,
+                            [repo[remote_master].id],
+                        )
                     # Notify user
                     show_information(
                         title="Repo force updated",
                         text="The configured repository was updated!",
-                        information=f"{repo_path} ->\n "
-                        + f"{repo.head.commit.message}",
+                        information=f"{repo_path}",
                     )
                     # Cleanup
-                    self._do_cleanup_gitpython(repo=repo)
-                except GitCommandError:
+                    self._do_cleanup_pygit2(repo=repo)
+                except GitError:
                     stacktrace = traceback.format_exc()
                     show_warning(
                         title="Failed to update repo!",
@@ -2382,13 +2366,10 @@ class MainContent(QObject):
                     information="Would you like to clone a new copy of this repository?",
                 )
                 if answer == "&Yes":
-                    if GIT_EXISTS:
-                        self._do_clone_repo_to_path(
-                            base_path=base_path,
-                            repo_url=repo_url,
-                        )
-                    else:
-                        self._do_notify_no_git()
+                    self._do_clone_repo_to_path(
+                        base_path=base_path,
+                        repo_url=repo_url,
+                    )
         else:
             # Warn the user so they know to configure in settings
             show_warning(
@@ -2479,7 +2460,7 @@ class MainContent(QObject):
                     pull_request_body = f"Steam Workshop {commit_message}"
 
                     # Open repo
-                    local_repo = Repo(repo_path)
+                    local_repo = Repository.path(repo_path)
 
                     # Create our new branch and checkout
                     new_branch = local_repo.create_head(new_branch_name)
@@ -2523,7 +2504,7 @@ class MainContent(QObject):
                             details=stacktrace,
                         )
                     # Cleanup
-                    self._do_cleanup_gitpython(repo=local_repo)
+                    self._do_cleanup_pygit2(repo=local_repo)
                     # Notify the pull request URL
                     answer = show_dialogue_conditional(
                         title="Pull request created",
@@ -2549,13 +2530,10 @@ class MainContent(QObject):
                     information="Would you like to clone a new copy of this repository?",
                 )
                 if answer == "&Yes":
-                    if GIT_EXISTS:
-                        self._do_clone_repo_to_path(
-                            base_path=str(AppInfo().databases_folder),
-                            repo_url=repo_url,
-                        )
-                    else:
-                        self._do_notify_no_git()
+                    self._do_clone_repo_to_path(
+                        base_path=str(AppInfo().databases_folder),
+                        repo_url=repo_url,
+                    )
         else:
             # Warn the user so they know to configure in settings
             show_warning(
@@ -2811,7 +2789,7 @@ class MainContent(QObject):
                     if metadata.get("steamcmd"):
                         mod_pfid = metadata.get("publishedfileid")
                     if mod_pfid and mod_pfid in self.db_builder.publishedfileids:
-                        logger.warning(
+                        logger.debug(
                             f"Skipping download of existing SteamCMD mod: {mod_pfid}"
                         )
                         self.db_builder.publishedfileids.remove(mod_pfid)
@@ -3139,31 +3117,17 @@ class MainContent(QObject):
 
     @Slot()
     def _on_do_download_community_db_from_github(self) -> None:
-        if GIT_EXISTS:
-            self._do_clone_repo_to_path(
-                base_path=str(AppInfo().databases_folder),
-                repo_url=self.settings_controller.settings.external_community_rules_repo,
-            )
-        else:
-            self._do_notify_no_git()
+        self._do_clone_repo_to_path(
+            base_path=str(AppInfo().databases_folder),
+            repo_url=self.settings_controller.settings.external_community_rules_repo,
+        )
 
     @Slot()
     def _on_do_download_steam_workshop_db_from_github(self) -> None:
-        if GIT_EXISTS:
-            self._do_clone_repo_to_path(
-                base_path=str(AppInfo().databases_folder),
-                repo_url=self.settings_controller.settings.external_steam_metadata_repo,
-            )
-        else:
-            self._do_notify_no_git()
-
-    @Slot()
-    def _on_do_upload_log(self) -> None:
-        ret = upload_data_to_0x0_st(
-            str(AppInfo().user_log_folder / (AppInfo().app_name + ".log"))
+        self._do_clone_repo_to_path(
+            base_path=str(AppInfo().databases_folder),
+            repo_url=self.settings_controller.settings.external_steam_metadata_repo,
         )
-        if ret:
-            webbrowser.open(ret)
 
     @Slot()
     def _on_do_download_all_mods_via_steamcmd(self) -> None:

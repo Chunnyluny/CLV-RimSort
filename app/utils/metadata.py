@@ -1,10 +1,8 @@
 import json
-from loguru import logger
-from natsort import natsorted
 import os
+import traceback
 from pathlib import Path
 from time import localtime, strftime, time
-import traceback
 from typing import Any, Dict, Optional, Tuple, Union
 from uuid import uuid4
 
@@ -15,6 +13,8 @@ from PySide6.QtCore import (
     QThreadPool,
     Signal,
 )
+from loguru import logger
+from natsort import natsorted
 
 from app.controllers.settings_controller import SettingsController
 from app.models.dialogue import (
@@ -428,6 +428,9 @@ class MetadataManager(QObject):
                     "ludeon.rimworld.biotech": {
                         "appid": "1826140",
                     },
+                    "ludeon.rimworld.anomaly": {
+                        "appid": "2380740",
+                    },
                 }
                 for data in expansion_data.values():
                     package_id = data["packageid"]
@@ -445,11 +448,11 @@ class MetadataManager(QObject):
                                 "description": RIMWORLD_DLC_METADATA[dlc_data["appid"]][
                                     "description"
                                 ],
-                                "supportedversions": {
-                                    "li": ".".join(self.game_version.split(".")[:2])
-                                }
-                                if not data.get("supportedversions")
-                                else data.get("supportedversions"),
+                                "supportedversions": (
+                                    {"li": ".".join(self.game_version.split(".")[:2])}
+                                    if not data.get("supportedversions")
+                                    else data.get("supportedversions")
+                                ),
                             }
                         )
                     else:
@@ -617,6 +620,54 @@ class MetadataManager(QObject):
         # Calculate and cache dependencies for ALL mods
         logger.info("Parsing dependencies & load order rules from external metadata")
         self.compile_metadata()
+
+    def is_version_mismatch(self, uuid: str) -> bool:
+        """
+        Check version for everything except Core.
+        Return True if the version does not match.
+        Return False if the version matches.
+        If there is an error, log it and return True.
+        """
+        # Initialize result to True, if an error occurs, it will be changed to False
+        result = True
+
+        # Get mod data
+        mod_data = self.internal_local_metadata.get(uuid, {})
+
+        # Check if game_version exists and mod_data exists and mod_data contains 'supportedversions' with 'li' key
+        if (
+            self.game_version
+            and mod_data
+            and mod_data.get("supportedversions", {}).get("li")
+        ):
+            # Get supported versions
+            supported_versions = self.internal_local_metadata[uuid][
+                "supportedversions"
+            ]["li"]
+
+            # Check if supported versions is a string or a list
+            if isinstance(supported_versions, str):
+                # If game_version starts with supported_versions, result is False
+                if self.game_version.startswith(supported_versions):
+                    result = False
+            elif isinstance(supported_versions, list):
+                # If any version from supported_versions starts with game_version, result is False
+                result = not any(
+                    [
+                        ver
+                        for ver in supported_versions
+                        if self.game_version.startswith(ver)
+                    ]
+                )
+            else:
+                # If supported_versions is not a string or a list, log error and return True
+                logger.error(
+                    f"supportedversions value not str or list: {supported_versions}"
+                )
+                result = True
+
+        # Return result
+        return result
 
     def process_mods(self, directories_to_process: list, intent: str) -> Dict[str, Any]:
         logger.info(
@@ -928,9 +979,9 @@ class MetadataManager(QObject):
                 if db_packageid:
                     db_packageid = db_packageid.lower()  # Normalize packageid
                     steam_id_to_package_id[publishedfileid] = db_packageid
-                    self.info_from_steam_package_id_to_name[
-                        db_packageid
-                    ] = mod_data.get("name")
+                    self.info_from_steam_package_id_to_name[db_packageid] = (
+                        mod_data.get("name")
+                    )
                     package_uuid = packageid_to_uuid.get(db_packageid)
                     if (
                         package_uuid
@@ -1319,36 +1370,51 @@ class ModParser(QRunnable):
                     # Track pfid if we parsed one earlier
                     if pfid:  # Make some assumptions if we have a pfid
                         mod_metadata["publishedfileid"] = pfid
-                        mod_metadata[
-                            "steam_uri"
-                        ] = f"steam://url/CommunityFilePage/{pfid}"
-                        mod_metadata[
-                            "steam_url"
-                        ] = f"https://steamcommunity.com/sharedfiles/filedetails/?id={pfid}"
+                        mod_metadata["steam_uri"] = (
+                            f"steam://url/CommunityFilePage/{pfid}"
+                        )
+                        mod_metadata["steam_url"] = (
+                            f"https://steamcommunity.com/sharedfiles/filedetails/?id={pfid}"
+                        )
                     # If a mod contains C# assemblies, we want to tag the mod
-                    assemblies_path = str((directory_path / "Assemblies"))
-                    if os.path.exists(assemblies_path):
-                        if any(
-                            filename.endswith((".dll", ".DLL"))
-                            for filename in os.listdir(assemblies_path)
-                        ):
-                            mod_metadata["csharp"] = True
+                    assemblies_path = str(directory_path / "Assemblies")
+                    # Check if the 'Assemblies' directory exists and is a directory
+                    if os.path.exists(assemblies_path) and os.path.isdir(
+                        assemblies_path
+                    ):
+                        try:
+                            # Check if there are any .dll files in the 'Assemblies' directory
+                            if any(
+                                filename.endswith((".dll", ".DLL"))
+                                for filename in os.listdir(assemblies_path)
+                            ):
+                                mod_metadata["csharp"] = (
+                                    True  # Tag the mod as containing C# code
+                                )
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to list directory {assemblies_path}: {e}"
+                            )
                     else:
+                        # If no 'Assemblies' directory in the main folder, check in subfolders
+                        logger.debug("Checking subfolders for C# assemblies")
                         subfolder_paths = [
-                            str((directory_path / folder))
+                            str(directory_path / folder)
                             for folder in os.listdir(directory)
-                            if os.path.isdir(str((directory_path / folder)))
+                            if os.path.isdir(str(directory_path / folder))
                         ]
                         for subfolder_path in subfolder_paths:
-                            assemblies_path = str(
-                                os.path.join(Path(subfolder_path) / "Assemblies")
-                            )
+                            assemblies_path = str(Path(subfolder_path) / "Assemblies")
+                            # Check if the 'Assemblies' directory exists in the subfolder
                             if os.path.exists(assemblies_path):
+                                # Check if there are any .dll files in this 'Assemblies' directory
                                 if any(
                                     filename.endswith((".dll", ".DLL"))
                                     for filename in os.listdir(assemblies_path)
                                 ):
-                                    mod_metadata["csharp"] = True
+                                    mod_metadata["csharp"] = (
+                                        True  # Tag the mod as containing C# code
+                                    )
                     # data_source will be used with setIcon later
                     mod_metadata["data_source"] = intent
                     mod_metadata["folder"] = directory_name
@@ -1418,12 +1484,12 @@ class ModParser(QRunnable):
                     if scenario_metadata.get(
                         "publishedfileid"
                     ):  # Make some assumptions if we have a pfid
-                        scenario_metadata[
-                            "steam_uri"
-                        ] = f"steam://url/CommunityFilePage/{pfid}"
-                        scenario_metadata[
-                            "steam_url"
-                        ] = f"https://steamcommunity.com/sharedfiles/filedetails/?id={pfid}"
+                        scenario_metadata["steam_uri"] = (
+                            f"steam://url/CommunityFilePage/{pfid}"
+                        )
+                        scenario_metadata["steam_url"] = (
+                            f"https://steamcommunity.com/sharedfiles/filedetails/?id={pfid}"
+                        )
                     # data_source will be used with setIcon later
                     scenario_metadata["data_source"] = intent
                     scenario_metadata["folder"] = directory_name
@@ -1772,19 +1838,22 @@ def get_mods_from_list(
                         paths_to_uuid = {}
                         for duplicate_uuid in duplicate_mods[target_id]:
                             if source in all_mods[duplicate_uuid]["data_source"]:
-                                paths_to_uuid[
-                                    all_mods[duplicate_uuid]["path"]
-                                ] = duplicate_uuid
+                                paths_to_uuid[all_mods[duplicate_uuid]["path"]] = (
+                                    duplicate_uuid
+                                )
                         # Sort duplicate mod paths from current source priority using natsort
                         source_paths_sorted = natsorted(paths_to_uuid.keys())
                         if source_paths_sorted:  # If we have paths returned
                             # If we are here, we've found our calculated duplicate, log and use this mod
+                            calculated_duplicate_uuid = paths_to_uuid[
+                                source_paths_sorted[0]
+                            ]
                             logger.debug(
-                                f"Using duplicate {source} mod for {target_id}: {all_mods[paths_to_uuid[source_paths_sorted[0]]]['path']}"
+                                f"Using duplicate {source} mod for {target_id}: {all_mods[calculated_duplicate_uuid]['path']}"
                             )
                             populated_mods.append(target_id)
                             duplicates_processed.append(target_id)
-                            active_mods_uuids.append(duplicate_uuid)
+                            active_mods_uuids.append(calculated_duplicate_uuid)
                             break
                         else:  # Skip this source priority if no paths
                             logger.debug(f"No paths returned for {source}")
@@ -1903,7 +1972,7 @@ class SteamDatabaseBuilder(QThread):
                     if len(self.mods.keys()) > 0:  # No empty queries!
                         # Since the key is valid, and we have a list of pfid, we try to launch a live query
                         self.db_builder_message_output_signal.emit(
-                            f'\nInitializing "DynamicQuery" with configured Steam API key for {self.appid}...\n'
+                            f'\nInitializing "DynamicQuery" with configured Steam API key for {self.appid}\n'
                         )
                         database = self._init_db_from_local_metadata()
                         publishedfileids = []
@@ -1933,7 +2002,7 @@ class SteamDatabaseBuilder(QThread):
                         return
             elif self.mode == "pfids_by_appid":
                 self.db_builder_message_output_signal.emit(
-                    f'\nInitializing "PublishedFileIDs by AppID" Query with configured Steam API key for AppID: {self.appid}...\n\n'
+                    f'\nInitializing "PublishedFileIDs by AppID" Query with configured Steam API key for AppID: {self.appid}\n\n'
                 )
                 # Create query
                 dynamic_query = DynamicQuery(self.apikey, self.appid)
@@ -1969,11 +2038,13 @@ class SteamDatabaseBuilder(QThread):
                         "url": f'https://store.steampowered.com/app/{v["appid"]}',
                         "packageid": v.get("packageid"),
                         "name": v.get("name"),
-                        "authors": ", ".join(v.get("authors").get("li"))
-                        if v.get("authors")
-                        and isinstance(v.get("authors"), dict)
-                        and v.get("authors").get("li")
-                        else v.get("authors", "Missing XML: <author(s)>"),
+                        "authors": (
+                            ", ".join(v.get("authors").get("li"))
+                            if v.get("authors")
+                            and isinstance(v.get("authors"), dict)
+                            and v.get("authors").get("li")
+                            else v.get("authors", "Missing XML: <author(s)>")
+                        ),
                     }
                     for v in self.mods.values()
                     if v.get("appid")
@@ -1982,26 +2053,36 @@ class SteamDatabaseBuilder(QThread):
                     v["publishedfileid"]: {
                         "url": f'https://steamcommunity.com/sharedfiles/filedetails/?id={v["publishedfileid"]}',
                         "packageId": v.get("packageid"),
-                        "name": v.get("name")
-                        if not v.get("DB_BUILDER_NO_NAME")
-                        else "Missing XML: <name>",
-                        "authors": ", ".join(v.get("authors").get("li"))
-                        if v.get("authors")
-                        and isinstance(v.get("authors"), dict)
-                        and v.get("authors").get("li")
-                        else v.get("authors", "Missing XML: <author(s)>"),
-                        "gameVersions": v.get("supportedversions").get("li")
-                        if isinstance(v.get("supportedversions", {}).get("li"), list)
-                        else [
-                            v.get("supportedversions", {}).get(
-                                "li",
+                        "name": (
+                            v.get("name")
+                            if not v.get("DB_BUILDER_NO_NAME")
+                            else "Missing XML: <name>"
+                        ),
+                        "authors": (
+                            ", ".join(v.get("authors").get("li"))
+                            if v.get("authors")
+                            and isinstance(v.get("authors"), dict)
+                            and v.get("authors").get("li")
+                            else v.get("authors", "Missing XML: <author(s)>")
+                        ),
+                        "gameVersions": (
+                            v.get("supportedversions").get("li")
+                            if isinstance(
+                                v.get("supportedversions", {}).get("li"), list
                             )
-                            if v.get("supportedversions")
-                            else v.get(
-                                "targetversion",
-                                "Missing XML: <supportedversions> or <targetversion>",
-                            )
-                        ],
+                            else [
+                                (
+                                    v.get("supportedversions", {}).get(
+                                        "li",
+                                    )
+                                    if v.get("supportedversions")
+                                    else v.get(
+                                        "targetversion",
+                                        "Missing XML: <supportedversions> or <targetversion>",
+                                    )
+                                )
+                            ]
+                        ),
                     }
                     for v in self.mods.values()
                     if v.get("publishedfileid")
@@ -2011,7 +2092,7 @@ class SteamDatabaseBuilder(QThread):
         total = len(db_from_local_metadata["database"].keys())
         self.db_builder_message_output_signal.emit(
             f"Populated {total} items from locally found metadata into initial database for "
-            + f"{self.appid}..."
+            + f"{self.appid}"
         )
         return db_from_local_metadata
 
