@@ -79,9 +79,38 @@ class MenuBarController(QObject):
 
         self.menu_bar.paste_action.triggered.connect(self._on_menu_bar_paste_triggered)
 
+        # Download menu
+
+        self.menu_bar.add_git_mod_action.triggered.connect(
+            EventBus().do_add_git_mod.emit
+        )
+
+        self.menu_bar.browse_workshop_action.triggered.connect(
+            EventBus().do_browse_workshop
+        )
+
+        self.menu_bar.update_workshop_mods_action.triggered.connect(
+            EventBus().do_check_for_workshop_updates
+        )
+
+        # Textures menu
+
+        self.menu_bar.optimize_textures_action.triggered.connect(
+            EventBus().do_optimize_textures
+        )
+
+        self.menu_bar.delete_dds_textures_action.triggered.connect(
+            EventBus().do_delete_dds_textures
+        )
+
         # Help menu
 
         self.menu_bar.wiki_action.triggered.connect(self._on_menu_bar_wiki_triggered)
+
+        # External signals
+
+        EventBus().refresh_started.connect(self._on_refresh_started)
+        EventBus().refresh_finished.connect(self._on_refresh_finished)
 
     @Slot()
     def _on_menu_bar_check_for_updates_on_startup_triggered(self) -> None:
@@ -116,3 +145,19 @@ class MenuBarController(QObject):
     @Slot()
     def _on_menu_bar_wiki_triggered(self) -> None:
         open_url_browser("https://github.com/RimSort/RimSort/wiki")
+
+    @Slot()
+    def _on_refresh_started(self) -> None:
+        """
+        Disable all menus in the menu bar.
+        """
+        for action in self.menu_bar.menu_bar.actions():
+            action.setEnabled(False)
+
+    @Slot()
+    def _on_refresh_finished(self) -> None:
+        """
+        Enable all menus in the menu bar.
+        """
+        for action in self.menu_bar.menu_bar.actions():
+            action.setEnabled(True)

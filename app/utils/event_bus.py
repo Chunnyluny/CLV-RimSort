@@ -1,4 +1,5 @@
 from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import QPushButton
 
 
 class EventBus(QObject):
@@ -20,9 +21,7 @@ class EventBus(QObject):
 
     _instance = None
 
-    # Application-scope signals
-    settings_have_changed = Signal()
-
+    # Menu bar signals
     do_check_for_application_update = Signal()
     do_open_mod_list = Signal()
     do_save_mod_list_as = Signal()
@@ -31,7 +30,22 @@ class EventBus(QObject):
     do_export_mod_list_to_clipboard = Signal()
     do_export_mod_list_to_rentry = Signal()
 
+    # Download Menu bar signals
+    do_add_git_mod = Signal()
+    do_browse_workshop = Signal()
+    do_check_for_workshop_updates = Signal()
+
+    # Textures Menu bar signals
+    do_optimize_textures = Signal()
+    do_delete_dds_textures = Signal()
+
+    # Settings signals
+    settings_have_changed = Signal()
+
+    # SettingsDialog signals
+    do_upload_community_rules_db_to_github = Signal()
     do_download_community_rules_db_from_github = Signal()
+    do_upload_steam_workshop_db_to_github = Signal()
     do_download_steam_workshop_db_from_github = Signal()
     do_upload_rimsort_log = Signal()
     do_upload_rimsort_old_log = Signal()
@@ -44,6 +58,24 @@ class EventBus(QObject):
     do_import_acf = Signal()
     do_delete_acf = Signal()
     do_install_steamcmd = Signal()
+    do_edit_run_arguments = Signal()
+
+    # MainWindow signals
+    do_button_animation = Signal(QPushButton)
+    do_save_button_animation_start = Signal()
+    do_save_button_animation_stop = Signal()
+    do_refresh_mods_lists = Signal()
+    do_clear_active_mods_list = Signal()
+    do_restore_active_mods_list = Signal()
+    do_sort_active_mods_list = Signal()
+    do_save_active_mods_list = Signal()
+    do_run_game = Signal()
+
+    refresh_started = Signal()
+    refresh_finished = Signal()
+
+    # ModsPanel signals
+    list_updated_signal = Signal()  # count, list_type
 
     def __new__(cls) -> "EventBus":
         """

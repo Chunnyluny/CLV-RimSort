@@ -100,7 +100,7 @@ class SettingsDialog(QDialog):
         buttons_layout.addStretch()
 
         # "Clear" button"
-        self.locations_clear_button = QPushButton("Clear", tab)
+        self.locations_clear_button = QPushButton("Clear All Locations", tab)
         buttons_layout.addWidget(self.locations_clear_button)
 
         # "Autodetect" button
@@ -129,6 +129,10 @@ class SettingsDialog(QDialog):
         self.game_location_choose_button.setText("Choose…")
         header_layout.addWidget(self.game_location_choose_button)
 
+        self.game_location_clear_button = QToolButton()
+        self.game_location_clear_button.setText("Clear…")
+        header_layout.addWidget(self.game_location_clear_button)
+
         self.game_location = QLineEdit()
         self.game_location.setTextMargins(GUIInfo().text_field_margins)
         self.game_location.setFixedHeight(GUIInfo().default_font_line_height * 2)
@@ -155,6 +159,10 @@ class SettingsDialog(QDialog):
         self.config_folder_location_choose_button = QToolButton()
         self.config_folder_location_choose_button.setText("Choose…")
         header_layout.addWidget(self.config_folder_location_choose_button)
+
+        self.config_folder_location_clear_button = QToolButton()
+        self.config_folder_location_clear_button.setText("Clear…")
+        header_layout.addWidget(self.config_folder_location_clear_button)
 
         self.config_folder_location = QLineEdit()
         self.config_folder_location.setTextMargins(GUIInfo().text_field_margins)
@@ -185,6 +193,10 @@ class SettingsDialog(QDialog):
         self.steam_mods_folder_location_choose_button.setText("Choose…")
         header_layout.addWidget(self.steam_mods_folder_location_choose_button)
 
+        self.steam_mods_folder_location_clear_button = QToolButton()
+        self.steam_mods_folder_location_clear_button.setText("Clear…")
+        header_layout.addWidget(self.steam_mods_folder_location_clear_button)
+
         self.steam_mods_folder_location = QLineEdit()
         self.steam_mods_folder_location.setTextMargins(GUIInfo().text_field_margins)
         self.steam_mods_folder_location.setFixedHeight(
@@ -213,6 +225,10 @@ class SettingsDialog(QDialog):
         self.local_mods_folder_location_choose_button = QToolButton()
         self.local_mods_folder_location_choose_button.setText("Choose…")
         header_layout.addWidget(self.local_mods_folder_location_choose_button)
+
+        self.local_mods_folder_location_clear_button = QToolButton()
+        self.local_mods_folder_location_clear_button.setText("Clear…")
+        header_layout.addWidget(self.local_mods_folder_location_clear_button)
 
         self.local_mods_folder_location = QLineEdit()
         self.local_mods_folder_location.setTextMargins(GUIInfo().text_field_margins)
@@ -287,6 +303,11 @@ class SettingsDialog(QDialog):
         self.community_rules_db_github_url.setClearButtonEnabled(True)
         self.community_rules_db_github_url.setEnabled(False)
         row_layout.addWidget(self.community_rules_db_github_url)
+
+        self.community_rules_db_github_upload_button = QToolButton()
+        self.community_rules_db_github_upload_button.setText("Upload…")
+        self.community_rules_db_github_upload_button.setEnabled(False)
+        row_layout.addWidget(self.community_rules_db_github_upload_button)
 
         self.community_rules_db_github_download_button = QToolButton()
         self.community_rules_db_github_download_button.setText("Download…")
@@ -387,6 +408,11 @@ class SettingsDialog(QDialog):
         self.steam_workshop_db_github_url.setClearButtonEnabled(True)
         self.steam_workshop_db_github_url.setEnabled(False)
         row_layout.addWidget(self.steam_workshop_db_github_url)
+
+        self.steam_workshop_db_github_upload_button = QToolButton()
+        self.steam_workshop_db_github_upload_button.setText("Upload…")
+        self.steam_workshop_db_github_upload_button.setEnabled(False)
+        row_layout.addWidget(self.steam_workshop_db_github_upload_button)
 
         self.steam_workshop_db_github_download_button = QToolButton()
         self.steam_workshop_db_github_download_button.setText("Download…")
@@ -773,6 +799,11 @@ class SettingsDialog(QDialog):
 
         buttons_layout = QHBoxLayout()
         tab_layout.addLayout(buttons_layout)
+
+        buttons_layout.addStretch()
+
+        self.edit_run_arguments_button = QPushButton("Edit Game Run Arguments")
+        buttons_layout.addWidget(self.edit_run_arguments_button)
 
         buttons_layout.addStretch()
 

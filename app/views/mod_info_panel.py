@@ -11,6 +11,7 @@ from loguru import logger
 from app.models.image_label import ImageLabel
 from app.models.scroll_label import ScrollLabel
 from app.utils.app_info import AppInfo
+from app.utils.metadata import MetadataManager
 
 
 class ModInfo:
@@ -24,6 +25,9 @@ class ModInfo:
         Initialize the class.
         """
         logger.debug("Initializing ModInfo")
+
+        # Cache MetadataManager instance
+        self.metadata_manager = MetadataManager.instance()
 
         # Base layout type
         self.panel = QVBoxLayout()
@@ -116,7 +120,7 @@ class ModInfo:
         self.mod_info_path_value.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.mod_info_path_value.setWordWrap(True)
         self.description = ScrollLabel()
-        self.description.setText("\n\n\n\n\t\t\t        Welcome to RimSort!")
+        self.description.setText("\n\n\n\n\t\t\tWelcome to RimSort!")
         # Add widgets to child layouts
         self.image_layout.addWidget(self.preview_picture)
         self.mod_info_name.addWidget(self.mod_info_name_label, 20)
@@ -170,7 +174,7 @@ class ModInfo:
 
         logger.debug("Finished ModInfo initialization")
 
-    def display_mod_info(self, mod_info: Dict[str, Any]) -> None:
+    def display_mod_info(self, uuid: str) -> None:
         """
         This slot receives a the complete mod data json for
         the mod that was just clicked on. It will set the relevant
@@ -178,6 +182,30 @@ class ModInfo:
 
         :param mod_info: complete json info for the mod
         """
+        mod_info = self.metadata_manager.internal_local_metadata.get(uuid)
+        # Style summary values based on validity
+        if mod_info and mod_info.get("invalid"):
+            # Set invalid value style
+            for widget in (
+                self.mod_info_name_value,
+                self.mod_info_path_value,
+                self.mod_info_author_value,
+                self.mod_info_package_id_value,
+            ):
+                widget.setObjectName("summaryValueInvalid")
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
+        else:
+            # Set valid value style
+            for widget in (
+                self.mod_info_name_value,
+                self.mod_info_path_value,
+                self.mod_info_author_value,
+                self.mod_info_package_id_value,
+            ):
+                widget.setObjectName("summaryValue")
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
         # Set name value
         self.mod_info_name_value.setText(mod_info.get("name", "Not specified"))
         # Show essential info widgets
@@ -340,9 +368,6 @@ class ModInfo:
                             )
                         )
                 else:
-                    logger.error(
-                        f"The local data for the mod {self.mod_info_package_id_value} was not found. Using cached metadata with missing Preview image."
-                    )
                     pixmap = QPixmap(self.missing_image_path)
                     self.preview_picture.setPixmap(
                         pixmap.scaled(self.preview_picture.size(), Qt.KeepAspectRatio)

@@ -4,9 +4,14 @@ import sys
 from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QApplication
 
+from app.controllers.main_window_controller import MainWindowController
+from app.controllers.settings_controller import SettingsController
+from app.models.settings import Settings
 from app.utils.app_info import AppInfo
 from app.utils.constants import DEFAULT_USER_RULES
+from app.utils.metadata import MetadataManager
 from app.views.main_window import MainWindow
+from app.views.settings_dialog import SettingsDialog
 
 
 class AppController(QObject):
@@ -30,13 +35,25 @@ class AppController(QObject):
             with open(user_rules_path, "w", encoding="utf-8") as output:
                 json.dump(initial_rules_db, output, indent=4)
 
-        # Instantiate and show the main window
-        self.main_window = MainWindow()
-        self.main_window.show()
-        self.main_window.initialize_content()
+        # Instantiate the settings model, view and controller
+        self.settings = Settings()
+        self.settings_dialog = SettingsDialog()
+        self.settings_controller = SettingsController(
+            model=self.settings, view=self.settings_dialog
+        )
+
+        # Initialize the MetadataManager
+        self.metadata_manager = MetadataManager.instance(
+            settings_controller=self.settings_controller
+        )
+
+        # Instantiate the main window and its controller
+        self.main_window = MainWindow(settings_controller=self.settings_controller)
+        self.main_window_controller = MainWindowController(self.main_window)
 
     def run(self) -> int:
         self.main_window.show()
+        self.main_window.initialize_content()
         return self.app.exec()
 
     def shutdown_watchdog(self) -> None:

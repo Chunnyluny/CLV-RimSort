@@ -27,6 +27,7 @@ from app.utils.constants import (
     DB_BUILDER_PRUNE_EXCEPTIONS,
     DB_BUILDER_RECURSE_EXCEPTIONS,
     DEFAULT_USER_RULES,
+    MOD_RECURSE_EXCEPTIONS,
     RIMWORLD_DLC_METADATA,
 )
 from app.utils.generic import directories
@@ -45,7 +46,9 @@ from app.utils.xml import xml_path_to_json
 
 class MetadataManager(QObject):
     _instance: Optional["MetadataManager"] = None
-
+    mod_created_signal = Signal(str)
+    mod_deleted_signal = Signal(str)
+    mod_metadata_updated_signal = Signal(str)
     show_warning_signal = Signal(str, str, str, str)
     update_game_configuration_signal = Signal()
 
@@ -68,32 +71,33 @@ class MetadataManager(QObject):
             self.show_warning_signal.connect(show_warning)
 
             # Store parsed metadata & paths
-            self.info_from_steam_package_id_to_name = {}
-            self.external_steam_metadata = None
-            self.external_steam_metadata_path = None
-            self.external_community_rules = None
-            self.external_community_rules_path = None
-            self.external_user_rules = None
-            self.external_user_rules_path = str(
+            self.external_steam_metadata: Optional[Dict[str, Any]] = None
+            self.external_steam_metadata_path: Optional[str] = None
+            self.external_community_rules: Optional[Dict[str, Any]] = None
+            self.external_community_rules_path: Optional[str] = None
+            self.external_user_rules: Optional[Dict[str, Any]] = None
+            self.external_user_rules_path: Optional[str] = str(
                 AppInfo().databases_folder / "userRules.json"
             )
-            self.internal_local_metadata = {}
-            self.expansion_subdirectories = []
-            self.local_subdirectories = []
-            self.workshop_subdirectories = []
-
+            # Local metadata
+            self.internal_local_metadata: Dict[str, Any] = {}
+            # Mappers
+            self.mod_metadata_file_mapper: Dict[str, str] = {}
+            self.mod_metadata_dir_mapper: Dict[str, str] = {}
+            self.packageid_to_uuids: Dict[str, set(str)] = {}
+            self.steamdb_packageid_to_name: Dict[str, str] = {}
             # Empty game version string unless the data is populated
-            self.game_version = ""
-
-            # Generate Steam .acf file path
-            self.steam_acf_path = str(
+            self.game_version: str = ""
+            # SteamCMD .acf file data
+            self.steamcmd_acf_data: Dict[str, Any] = {}
+            # Steam .acf file path / data
+            self.workshop_acf_path: Optional[str] = str(
                 # This is just getting the path 2 directories up from content/294100,
                 # so that we can find workshop/appworkshop_294100.acf
                 Path(self.settings_controller.settings.workshop_folder).parent.parent
                 / "appworkshop_294100.acf",
             )
-            logger.info("Finished MetadataManager initialization")
-            self.initialized = True
+            self.workshop_acf_data: Dict[str, Any] = {}
 
     @classmethod
     def instance(cls, *args: Any, **kwargs: Any) -> "MetadataManager":
@@ -103,7 +107,35 @@ class MetadataManager(QObject):
             raise ValueError("MetadataManager instance has already been initialized.")
         return cls._instance
 
+    def __refresh_acf_metadata(self) -> None:
+        # If we can find the appworkshop_294100.acf files from...
+        # ...SteamCMD
+        if os.path.exists(SteamcmdInterface.instance().steamcmd_appworkshop_acf_path):
+            try:
+                self.steamcmd_acf_data = acf_to_dict(
+                    SteamcmdInterface.instance().steamcmd_appworkshop_acf_path
+                )
+                logger.info(
+                    f"Successfully parsed SteamCMD appworkshop.acf metadata from: {SteamcmdInterface.instance().steamcmd_appworkshop_acf_path}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to parse SteamCMD appworkshop.acf metadata from: {SteamcmdInterface.instance().steamcmd_appworkshop_acf_path}. Error: {e}"
+                )
+        # ...Steam client
+        if os.path.exists(self.workshop_acf_path):
+            try:
+                self.workshop_acf_data = acf_to_dict(self.workshop_acf_path)
+                logger.info(
+                    f"Successfully parsed Steam client appworkshop.acf metadata from: {self.workshop_acf_path}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to parse Steam client appworkshop.acf metadata from: {self.workshop_acf_path}. Error: {e}"
+                )
+
     def __refresh_external_metadata(self) -> None:
+
         def get_configured_steam_db(
             self, life: int, path: str
         ) -> Tuple[Optional[Dict], Optional[str]]:
@@ -151,6 +183,11 @@ class MetadataManager(QObject):
                         logger.info(
                             f"Loaded metadata for {total_entries} Steam Workshop mods from Steam DB"
                         )
+                    self.steamdb_packageid_to_name = {
+                        metadata["packageid"]: metadata["name"]
+                        for metadata in db_data.get("database", {}).values()
+                        if metadata.get("packageid") and metadata.get("name")
+                    }
                     return db_json_data, path
 
             else:  # Assume db_data_missing
@@ -294,450 +331,175 @@ class MetadataManager(QObject):
                 json.dump(DEFAULT_USER_RULES, output, indent=4)
             self.external_user_rules = DEFAULT_USER_RULES["rules"]
 
-    def __refresh_internal_metadata(self) -> None:
-        def get_workshop_acf_data(
-            self, appworkshop_acf_path: str, workshop_mods: Dict[str, Any]
-        ) -> None:
-            """
-            Given a path to the Rimworld Steam Workshop appworkshop_294100.acf file, and parse it into a dict.
-
-            The purpose of this function is to populate the info from this file to mod_json_data for later usage.
-
-            :param appworkshop_acf_path: path to the Rimworld Steam Workshop appworkshop_294100.acf file
-            :param workshop_mods: a Dict containing parsed mod metadata from Steam workshop mods. This can be
-            all_mods or just a dict of Steam mods where their ["data_source"] is "workshop".
-            :param steamcmd_mode: set to True for mode which forces match of folder name + publishedfileid for parsing
-            """
-            workshop_acf_data = acf_to_dict(appworkshop_acf_path)
-            workshop_mods_pfid_to_uuid = {
-                metadata["publishedfileid"]: uuid
-                for uuid, metadata in workshop_mods.items()
-                if metadata.get("publishedfileid")
+    def __refresh_internal_metadata(self, is_initial: bool = False) -> None:
+        def batch_by_data_source(
+            self, data_source: str, mod_directories: list[str]
+        ) -> dict[str, Any]:
+            return {
+                path: self.mod_metadata_dir_mapper.get(path, str(uuid4()))
+                for path in mod_directories
             }
-            # Reference needed information from appworkshop_294100.acf
-            workshop_item_details = workshop_acf_data["AppWorkshop"][
-                "WorkshopItemDetails"
-            ]
-            workshop_items_installed = workshop_acf_data["AppWorkshop"][
-                "WorkshopItemsInstalled"
-            ]
-            # Loop through our metadata, append values
-            for publishedfileid, mod_uuid in workshop_mods_pfid_to_uuid.items():
-                if (
-                    workshop_item_details.get(publishedfileid, {}).get("timetouched")
-                    and workshop_item_details.get(publishedfileid, {}).get(
-                        "timetouched"
-                    )
-                    != 0
-                ):
-                    # The last time SteamCMD/Steam client touched a mod according to its entry
-                    workshop_mods[mod_uuid]["internal_time_touched"] = int(
-                        workshop_item_details[publishedfileid]["timetouched"]
-                    )
-                if workshop_item_details.get(publishedfileid, {}).get("timeupdated"):
-                    # The last time SteamCMD/Steam client updated a mod according to its entry
-                    workshop_mods[mod_uuid]["internal_time_updated"] = int(
-                        workshop_item_details[publishedfileid]["timeupdated"]
-                    )
-                if workshop_items_installed.get(publishedfileid, {}).get("timeupdated"):
-                    # The last time SteamCMD/Steam client updated a mod according to its entry
-                    workshop_mods[mod_uuid]["internal_time_updated"] = int(
-                        workshop_items_installed[publishedfileid]["timeupdated"]
-                    )
-
-        def get_game_version(self, game_path: str) -> str:
-            """
-            This function starts the Rimworld game version string from the file
-            'Version.txt' that is found in the configured game directory.
-
-            :param game_path: path to Rimworld game
-            :return: the game version as a string
-            """
-            logger.info(f"Getting game version from Game Folder: {game_path}")
-            version = ""
-            version_file_path = str((Path(game_path) / "Version.txt"))
-            logger.debug(f"Generated Version.txt path: {version_file_path}")
-            if os.path.exists(version_file_path):
-                try:
-                    with open(version_file_path, encoding="utf-8") as f:
-                        version = f.read()
-                        logger.info(
-                            f"Retrieved game version from Version.txt: {version.strip()}"
-                        )
-                except:
-                    logger.error(
-                        f"Unable to parse Version.txt from game folder: {version_file_path}"
-                    )
-            else:
-                logger.error(
-                    f"The provided Version.txt path does not exist: {version_file_path}"
-                )
-                self.show_warning_signal.emit(
-                    "Missing Version.txt",
-                    f"RimSort is unable to get the game version at the expected path: [{version_file_path}].",
-                    f"\nIs your game path [{game_path}] set correctly? There should be a Version.txt file in the game install directory.",
-                    "",
-                )
-            return version.strip()
-
-        def get_installed_expansions(self) -> Dict[str, Any]:
-            """
-            Given a path to the game's install folder, return a dict
-            containing data for all of the installed expansions
-            keyed to their package ids. The dict values are the converted
-            About.xmls. If the path does not exist, the dict
-            will be empty.
-
-            :param path: path to the Rimworld install folder
-            :return: a Dict of expansions by package id
-            """
-            expansion_data = {}
-            if self.settings_controller.settings.game_folder != "":
-                logger.info(
-                    f"Getting installed expansions with game folder path: "
-                    f"{self.settings_controller.settings.game_folder}"
-                )
-
-                # Get mod data
-                data_path = str(
-                    (Path(self.settings_controller.settings.game_folder) / "Data")
-                )
-                logger.info(
-                    f"Attempting to get expansion data from RimWorld's Data folder: {data_path}"
-                )
-                self.expansion_subdirectories = directories(data_path)
-                expansion_data = self.process_mods(
-                    directories_to_process=self.expansion_subdirectories,
-                    intent="expansion",
-                )
-                logger.info("Finished getting expansion data")
-
-                # Base game and expansion About.xml do not contain name, so these
-                # must be manually added
-                logger.info("Manually populating expansion data")
-                dlcs_packageid_to_appid = {
-                    "ludeon.rimworld": {
-                        "appid": "294100",
-                    },
-                    "ludeon.rimworld.royalty": {
-                        "appid": "1149640",
-                    },
-                    "ludeon.rimworld.ideology": {
-                        "appid": "1392840",
-                    },
-                    "ludeon.rimworld.biotech": {
-                        "appid": "1826140",
-                    },
-                    "ludeon.rimworld.anomaly": {
-                        "appid": "2380740",
-                    },
-                }
-                for data in expansion_data.values():
-                    package_id = data["packageid"]
-                    if package_id in dlcs_packageid_to_appid:
-                        dlc_data = dlcs_packageid_to_appid[package_id]
-                        data.update(
-                            {
-                                "appid": dlc_data["appid"],
-                                "name": RIMWORLD_DLC_METADATA[dlc_data["appid"]][
-                                    "name"
-                                ],
-                                "steam_url": RIMWORLD_DLC_METADATA[dlc_data["appid"]][
-                                    "steam_url"
-                                ],
-                                "description": RIMWORLD_DLC_METADATA[dlc_data["appid"]][
-                                    "description"
-                                ],
-                                "supportedversions": (
-                                    {"li": ".".join(self.game_version.split(".")[:2])}
-                                    if not data.get("supportedversions")
-                                    else data.get("supportedversions")
-                                ),
-                            }
-                        )
-                    else:
-                        logger.error(
-                            f"An unknown mod has been found in the expansions folder: {package_id} {data}"
-                        )
-                logger.info("Finished getting installed expansions")
-            else:
-                logger.error(
-                    "Skipping parsing data from empty game data path. Is the game path configured?"
-                )
-            return expansion_data
-
-        def get_local_mods(self) -> Dict[str, Any]:
-            """
-            Given a path to the local GAME_INSTALL_DIR/Mods folder, return a dict
-            containing data for all the mods keyed to their package ids.
-            The root-level key is the uuid, and the root-level value
-            is the converted About.xml. If the path does not exist, the dict
-            will be empty.
-
-            :param path: path to the Rimworld workshop mods folder
-            :return: a Dict of workshop mods by package id, and dict of community rules
-            """
-            mod_data = {}
-            if self.settings_controller.settings.local_folder != "":
-                if self.settings_controller.settings.game_folder:
-                    logger.info(
-                        f"Supplementing call with game folder path: {self.settings_controller.settings.game_folder}"
-                    )
-
-                # Get mod data
-                logger.info(
-                    f"Getting local mods from path: {self.settings_controller.settings.local_folder}"
-                )
-                self.local_subdirectories = directories(
-                    self.settings_controller.settings.local_folder
-                )
-                mod_data = self.process_mods(
-                    directories_to_process=self.local_subdirectories, intent="local"
-                )
-                logger.info("Finished getting local mod data")
-            else:
-                logger.debug(
-                    "Skipping parsing data from empty local mods path. Is the local mods path configured?"
-                )
-            return mod_data
-
-        def get_workshop_mods(self) -> Dict[str, Any]:
-            """
-            Given a path to the Rimworld Steam workshop folder, return a dict
-            containing data for all the mods keyed to their package ids.
-            The root-level key is the uuid, and the root-level value
-            is the converted About.xml. If the path does not exist, the dict
-            will be empty.
-
-            :param path: path to the Rimworld workshop mods folder
-            :return: a Dict of workshop mods by package id, and dict of community rules
-            """
-            mod_data = {}
-            if self.settings_controller.settings.workshop_folder != "":
-                logger.info(
-                    f"Getting workshop mods from path: {self.settings_controller.settings.workshop_folder}"
-                )
-                self.workshop_subdirectories = directories(
-                    self.settings_controller.settings.workshop_folder
-                )
-                mod_data = self.process_mods(
-                    directories_to_process=self.workshop_subdirectories,
-                    intent="workshop",
-                )
-                logger.info("Finished getting workshop mods")
-            else:
-                logger.debug(
-                    "Skipping parsing data from empty workshop mods path. Is the workshop mods path configured?"
-                )
-            return mod_data
-
-        def merge_mod_data(self, *dict_args: dict[str, Any]) -> Dict[str, Any]:
-            """
-            Given any number of dictionaries, shallow copy and merge into a new dict,
-            precedence goes to key-value pairs in latter dictionaries.
-            """
-            logger.info(f"Merging mods from {len(dict_args)} sources")
-            result = {}
-            for dictionary in dict_args:
-                result.update(dictionary)
-            return result
 
         # Get & set Rimworld version string
-        self.game_version = get_game_version(
-            self, game_path=self.settings_controller.settings.game_folder
+        version_file_path = str(
+            (Path(self.settings_controller.settings.game_folder) / "Version.txt")
         )
-
+        if os.path.exists(version_file_path):
+            try:
+                with open(version_file_path, encoding="utf-8") as f:
+                    self.game_version = f.read().strip()
+                    logger.info(
+                        f"Retrieved game version from Version.txt: {self.game_version}"
+                    )
+            except:
+                logger.error(
+                    f"Unable to parse Version.txt from game folder: {version_file_path}"
+                )
+        else:
+            logger.error(
+                f"The provided Version.txt path does not exist: {version_file_path}"
+            )
+            self.show_warning_signal.emit(
+                "Missing Version.txt",
+                f"RimSort is unable to get the game version at the expected path: [{version_file_path}].",
+                f"\nIs your game path [{self.settings_controller.settings.game_folder}] set correctly? There should be a Version.txt file in the game install directory.",
+                "",
+            )
         # Get and cache installed base game / DLC data
         if (
             self.settings_controller.settings.game_folder
             and self.settings_controller.settings.game_folder != ""
         ):
-            expansions = get_installed_expansions(self)
+            # Get mod data
+            data_path = str(
+                (Path(self.settings_controller.settings.game_folder) / "Data")
+            )
+            logger.info(
+                f"Querying Official expansions from RimWorld's Data folder: {data_path}"
+            )
+            # Scan our Official expansions directory
+            expansion_subdirectories = directories(data_path)
+            # Query the batch
+            self.process_batch(
+                batch=batch_by_data_source(self, "expansion", expansion_subdirectories),
+                data_source="expansion",
+            )
+            # Wait for pool to complete
+            self.parser_threadpool.waitForDone()
+            logger.info(
+                "Finished querying Official expansions. Supplementing metadata..."
+            )
+            # Create a packageid to appid mapping for quicker lookup
+            package_to_app = {
+                dlc["packageid"]: appid for appid, dlc in RIMWORLD_DLC_METADATA.items()
+            }
+            # Base game and expansion About.xml do not contain name, so these
+            # must be manually added
+            for metadata in self.internal_local_metadata.values():
+                package_id = metadata["packageid"]
+                appid = package_to_app.get(package_id)
+                if appid:
+                    dlc_metadata = RIMWORLD_DLC_METADATA[appid]
+                    # Default for supported versions if not already present
+                    default_versions = {
+                        "li": ".".join(self.game_version.split(".")[:2])
+                    }
+                    # Update metadata efficiently
+                    metadata.update(
+                        {
+                            "appid": appid,
+                            "name": dlc_metadata["name"],
+                            "steam_url": dlc_metadata["steam_url"],
+                            "description": dlc_metadata["description"],
+                            "supportedversions": metadata.get(
+                                "supportedversions", default_versions
+                            ),
+                        }
+                    )
         else:
-            expansions = {}
-
+            logger.error(
+                "Skipping parsing data from empty game data path. Is the game path configured?"
+            )
         # Get and cache installed local/SteamCMD Workshop mods
         if (
             self.settings_controller.settings.local_folder
             and self.settings_controller.settings.local_folder != ""
         ):
-            local_mods = get_local_mods(self)
-
-            # If we can find the appworkshop_294100.acf files from SteamCMD or Steam client
-            # SteamCMD
-            if os.path.exists(
-                SteamcmdInterface.instance().steamcmd_appworkshop_acf_path
-            ):  # If the file we want to parse exists
-                get_workshop_acf_data(
-                    self,
-                    appworkshop_acf_path=SteamcmdInterface.instance().steamcmd_appworkshop_acf_path,
-                    workshop_mods=local_mods,
-                )  # ... get data
-                logger.info(
-                    f"Successfully parsed SteamCMD appworkshop.acf metadata from: {SteamcmdInterface.instance().steamcmd_appworkshop_acf_path}"
-                )
-            else:
-                logger.debug(
-                    f"SteamCMD appworkshop.acf metadata not found. Skipping: {SteamcmdInterface.instance().steamcmd_appworkshop_acf_path}"
-                )
-                logger.debug(
-                    "Parsing timetouched from the Workshop mod folders on the filesystem"
-                )
+            # Get mod data
+            logger.info(
+                f"Querying local mods from path: {self.settings_controller.settings.local_folder}"
+            )
+            local_subdirectories = directories(
+                self.settings_controller.settings.local_folder
+            )
+            self.process_batch(
+                batch=batch_by_data_source(self, "local", local_subdirectories),
+                data_source="local",
+            )
         else:
-            local_mods = {}
+            logger.debug(
+                "Skipping parsing data from empty local mods path. Is the local mods path configured?"
+            )
         # Get and cache installed Steam client Workshop mods
         if (
             self.settings_controller.settings.workshop_folder
             and self.settings_controller.settings.workshop_folder != ""
         ):
-            workshop_mods = get_workshop_mods(self)
-            # Steam client
-            if os.path.exists(
-                self.steam_acf_path
-            ):  # If the file we want to parse exists
-                get_workshop_acf_data(
-                    self,
-                    appworkshop_acf_path=self.steam_acf_path,
-                    workshop_mods=workshop_mods,
-                )  # ... get data
-                logger.info(
-                    f"Successfully parsed Steam client appworkshop.acf metadata from: {self.steam_acf_path}"
-                )
-            else:
-                logger.debug(
-                    f"Steam client appworkshop.acf metadata not found. Skipping: {self.steam_acf_path}"
-                )
-        else:
-            workshop_mods = {}
-        # One working Dictionary for ALL mods
-        self.internal_local_metadata = merge_mod_data(
-            self, expansions, local_mods, workshop_mods
-        )
-        logger.info(
-            f"Combined {len(expansions)} expansions, {len(local_mods)} local mods, and {len(workshop_mods)}. Total elements to get dependencies for: {len(self.internal_local_metadata)}"
-        )
-
-        # Calculate and cache dependencies for ALL mods
-        logger.info("Parsing dependencies & load order rules from external metadata")
-        self.compile_metadata()
-
-    def is_version_mismatch(self, uuid: str) -> bool:
-        """
-        Check version for everything except Core.
-        Return True if the version does not match.
-        Return False if the version matches.
-        If there is an error, log it and return True.
-        """
-        # Initialize result to True, if an error occurs, it will be changed to False
-        result = True
-
-        # Get mod data
-        mod_data = self.internal_local_metadata.get(uuid, {})
-
-        # Check if game_version exists and mod_data exists and mod_data contains 'supportedversions' with 'li' key
-        if (
-            self.game_version
-            and mod_data
-            and mod_data.get("supportedversions", {}).get("li")
-        ):
-            # Get supported versions
-            supported_versions = self.internal_local_metadata[uuid][
-                "supportedversions"
-            ]["li"]
-
-            # Check if supported versions is a string or a list
-            if isinstance(supported_versions, str):
-                # If game_version starts with supported_versions, result is False
-                if self.game_version.startswith(supported_versions):
-                    result = False
-            elif isinstance(supported_versions, list):
-                # If any version from supported_versions starts with game_version, result is False
-                result = not any(
-                    [
-                        ver
-                        for ver in supported_versions
-                        if self.game_version.startswith(ver)
-                    ]
-                )
-            else:
-                # If supported_versions is not a string or a list, log error and return True
-                logger.error(
-                    f"supportedversions value not str or list: {supported_versions}"
-                )
-                result = True
-
-        # Return result
-        return result
-
-    def process_mods(self, directories_to_process: list, intent: str) -> Dict[str, Any]:
-        logger.info(
-            f"Processing updates for {len(directories_to_process)} mod directories"
-        )
-        # Create a shared results dict for our metadata
-        results = {}
-        # Process our parsers
-        for directory in directories_to_process:
-            parser = ModParser(
-                directory=directory,
-                intent=intent,
-                results=results,
-                steam_db=self.external_steam_metadata,
+            logger.info(
+                f"Querying workshop mods from path: {self.settings_controller.settings.workshop_folder}"
             )
-            # Start each parser in the pool
-            self.parser_threadpool.start(parser)
+            workshop_subdirectories = directories(
+                self.settings_controller.settings.workshop_folder
+            )
+            self.process_batch(
+                batch=batch_by_data_source(self, "workshop", workshop_subdirectories),
+                data_source="workshop",
+            )
+        else:
+            logger.debug(
+                "Skipping parsing data from empty workshop mods path. Is the workshop mods path configured?"
+            )
         # Wait for pool to complete
         self.parser_threadpool.waitForDone()
-        # Collect our results
-        logger.info(f"Finished processing directories for {intent}")
-        return results
-
-    def refresh_cache(self, is_initial=None) -> None:
-        """
-        This function contains expensive calculations for getting workshop
-        mods, known expansions, community rules, and most importantly, calculating
-        dependencies for all mods.
-
-        This function should be called on app initialization
-        and whenever the refresh button is pressed (mostly after changing the workshop
-        somehow, e.g. re-setting workshop path, mods config path, or downloading another mod,
-        but also after ModsConfig.xml path has been changed).
-        """
-        logger.info("Refreshing cache calculations")
-
-        # If we are refreshing cache from user action, update user paths as well in case of change
-        if not is_initial:
-            self.update_game_configuration_signal.emit()
-
-        # Update paths from game configuration
-
-        # Populate metadata
-        self.__refresh_external_metadata()
-        self.__refresh_internal_metadata()
-
-        logger.info("Finished refreshing cache calculations")
-
-    def compile_metadata(self) -> None:
-        """
-        Iterate through each expansion or mod and add new key-values describing
-        its dependencies, incompatibilities, and load order rules from external metadata.
-        """
-
-        logger.info("Started compiling internal metadata with external metadata")
-
-        # Create an index for self.internal_local_metadata
-        packageid_to_uuid = {
-            mod.get("packageid"): uuid
-            for uuid, mod in self.internal_local_metadata.items()
+        # Generate our file <-> UUID mappers for Watchdog and friends
+        # Map mod uuid to metadata file path
+        self.mod_metadata_file_mapper = {
+            **{
+                metadata.get(
+                    "metadata_file_path"
+                ): uuid  # We watch the mod's parent directory for changes, so we need to map to the mod's uuid
+                for uuid, metadata in self.internal_local_metadata.items()
+            },
+        }
+        # Map mod uuid to mod dir path
+        self.mod_metadata_dir_mapper = {
+            **{
+                metadata.get(
+                    "path"
+                ): uuid  # We watch the mod's parent directory for changes, so we need to map to the mod's uuid
+                for uuid, metadata in self.internal_local_metadata.items()
+            },
         }
 
+    def compile_metadata(self, uuids: list[str] = None) -> None:
+        """
+        Iterate through each expansion or mod and add new key-values describing the
+        dependencies, incompatibilities, and load order rules compiled from metadata.
+        """
+        # Compile metadata for all mods if uuids is None
+        uuids = uuids or list(self.internal_local_metadata.keys())
+        logger.info(f"Started compiling metadata for {len(uuids)} mods")
+        # Create an index for self.internal_local_metadata
+        packageid_to_uuid = {
+            self.internal_local_metadata[uuid].get("packageid"): uuid for uuid in uuids
+        }
         # Add dependencies to installed mods based on dependencies listed in About.xml TODO manifest.xml
         logger.info("Started compiling metadata from About.xml")
-        for uuid in self.internal_local_metadata:
+        for uuid in uuids:
             logger.debug(
                 f"UUID: {uuid} packageid: "
                 + self.internal_local_metadata[uuid].get("packageid")
             )
-
             # moddependencies are not equal to mod load order rules
             if self.internal_local_metadata[uuid].get("moddependencies"):
                 if isinstance(
@@ -979,9 +741,7 @@ class MetadataManager(QObject):
                 if db_packageid:
                     db_packageid = db_packageid.lower()  # Normalize packageid
                     steam_id_to_package_id[publishedfileid] = db_packageid
-                    self.info_from_steam_package_id_to_name[db_packageid] = (
-                        mod_data.get("name")
-                    )
+                    self.steamdb_packageid_to_name[db_packageid] = mod_data.get("name")
                     package_uuid = packageid_to_uuid.get(db_packageid)
                     if (
                         package_uuid
@@ -995,14 +755,12 @@ class MetadataManager(QObject):
                             tracking_dict.setdefault(db_packageid, set()).update(
                                 dependencies.keys()
                             )
-
             logger.debug(
                 f"Tracking {len(steam_id_to_package_id)} SteamDB packageids for lookup"
             )
             logger.debug(
                 f"Tracking Steam dependency data for {len(tracking_dict)} installed mods"
             )
-
             # For each mod that exists in self.internal_local_metadata -> dependencies (in Steam ID form)
             for (
                 installed_mod_package_id,
@@ -1032,7 +790,6 @@ class MetadataManager(QObject):
             log_deps_order_info(self.internal_local_metadata)
         else:
             logger.info("No Steam database supplied from external metadata. skipping.")
-
         # Add load order to installed mods based on dependencies from community rules
         if self.external_community_rules:
             logger.info("Started compiling metadata from configured Community Rules")
@@ -1062,7 +819,6 @@ class MetadataManager(QObject):
                                 self.internal_local_metadata,
                                 packageid_to_uuid,
                             )
-
                     load_these_before = self.external_community_rules[package_id].get(
                         "loadAfter"
                     )
@@ -1165,40 +921,178 @@ class MetadataManager(QObject):
             )
         logger.info("Finished compiling internal metadata with external metadata")
 
+    def is_version_mismatch(self, uuid: str) -> bool:
+        """
+        Check version for everything except Core.
+        Return True if the version does not match.
+        Return False if the version matches.
+        If there is an error, log it and return True.
+        """
+        # Initialize result to True, if an error occurs, it will be changed to False
+        result = True
+
+        # Get mod data
+        mod_data = self.internal_local_metadata.get(uuid, {})
+
+        # Check if game_version exists and mod_data exists and mod_data contains 'supportedversions' with 'li' key
+        if (
+            self.game_version
+            and mod_data
+            and mod_data.get("supportedversions", {}).get("li")
+        ):
+            # Get supported versions
+            supported_versions = self.internal_local_metadata[uuid][
+                "supportedversions"
+            ]["li"]
+
+            # Check if supported versions is a string or a list
+            if isinstance(supported_versions, str):
+                # If game_version starts with supported_versions, result is False
+                if self.game_version.startswith(supported_versions):
+                    result = False
+            elif isinstance(supported_versions, list):
+                # If any version from supported_versions starts with game_version, result is False
+                result = not any(
+                    [
+                        ver
+                        for ver in supported_versions
+                        if self.game_version.startswith(ver)
+                    ]
+                )
+            else:
+                # If supported_versions is not a string or a list, log error and return True
+                logger.error(
+                    f"supportedversions value not str or list: {supported_versions}"
+                )
+                result = True
+
+        # Return result
+        return result
+
+    def process_batch(
+        self,
+        batch: dict[str, str],  # Batch is a mapper of mod directory <-> UUID to parse
+        data_source: str,
+    ) -> dict[str, Any]:
+        for directory, uuid in batch.items():
+            self.process_update(
+                batch=True,
+                exists=uuid in self.internal_local_metadata.keys(),
+                data_source=data_source,
+                mod_directory=directory,
+                uuid=uuid,
+            )
+
+    def process_creation(self, data_source: str, mod_directory: str, uuid: str) -> None:
+        logger.debug(
+            f'Processing creation of {data_source + " mod" if data_source != "expansion" else data_source} for {mod_directory}'
+        )
+        self.process_update(
+            batch=False,
+            exists=uuid in self.internal_local_metadata.keys(),
+            data_source=data_source,
+            mod_directory=mod_directory,
+            uuid=uuid,
+        ),
+        self.mod_created_signal.emit(uuid)
+
+    def process_deletion(self, data_source: str, mod_directory: str, uuid: str) -> None:
+        logger.debug(
+            f"Processing deletion for {self.internal_local_metadata.get(uuid, {}).get('name', 'Unknown')}: {mod_directory}"
+        )
+        self.internal_local_metadata.pop(uuid, None)
+        self.mod_deleted_signal.emit(uuid)
+
+    def process_update(
+        self,
+        batch: bool,
+        exists: bool,
+        data_source: str,
+        mod_directory: str,
+        uuid: str,
+    ) -> None:
+        # logger.warning(exists)
+        parser = ModParser(
+            mod_directory=mod_directory,
+            data_source=data_source,
+            metadata_manager=self,
+            uuid=uuid,
+        )
+        self.parser_threadpool.start(parser)
+        # Wait for pool to complete if this is a single update
+        if not batch:
+            logger.debug(f"Waiting for metadata update to complete...")
+            self.parser_threadpool.waitForDone()
+        # Send signal to UI to update mod list if the mod we are updating exists
+        if exists and not batch:
+            self.compile_metadata(uuids=[uuid])
+            self.mod_metadata_updated_signal.emit(uuid)
+
+    def refresh_cache(self, is_initial=None) -> None:
+        """
+        This function contains expensive calculations for getting workshop
+        mods, known expansions, community rules, and most importantly, calculating
+        dependencies for all mods.
+
+        This function should be called on app initialization
+        and whenever the refresh button is pressed (mostly after changing the workshop
+        somehow, e.g. re-setting workshop path, mods config path, or downloading another mod,
+        but also after ModsConfig.xml path has been changed).
+        """
+        logger.info("Refreshing metadata cache...")
+
+        # If we are refreshing cache from user action, update user paths as well in case of change
+        if not is_initial:
+            self.update_game_configuration_signal.emit()
+
+        # Update paths from game configuration
+
+        # Populate metadata
+        self.__refresh_acf_metadata()
+        self.__refresh_external_metadata()
+        self.__refresh_internal_metadata(is_initial=is_initial)
+        self.compile_metadata(uuids=list(self.internal_local_metadata.keys()))
+
 
 class ModParser(QRunnable):
+
+    mod_metadata_updated_signal = Signal(str)
+
     def __init__(
         self,
-        directory: str,
-        intent: str,
-        results: Dict[str, Any],
-        steam_db: Dict[str, Any],
+        data_source: str,
+        mod_directory: str,
+        metadata_manager: MetadataManager,
+        uuid: str = None,
     ):
         super(ModParser, self).__init__()
-        # This is very spammy - only enable if you are really wanting to debug this class.
-        # logger.debug("Initializing ModParser")
-        self.directory = directory
-        self.intent = intent
-        self.results = results
-        self.steam_db = steam_db
+        self.data_source = data_source
+        self.mod_directory = mod_directory
+        self.metadata_manager = metadata_manager
+        self.uuid = uuid
 
-    def __parse_mod_data(
-        self, directory: str, intent: str, steam_db: Dict[str, Any]
+    def __parse_mod_metadata(
+        self,
+        data_source: str,
+        mod_directory: str,
+        metadata_manager: MetadataManager,
+        uuid: str,
     ) -> Dict[str, Any]:
-        logger.debug(f"Parsing directory: {directory}")
-        mods = {}
-        directory_path = Path(directory)
+        logger.debug(f"Parsing [{data_source}] directory: {mod_directory}")
+        metadata = {}
+        # Populate a UUID for the directory we are populating - re-use the same UUID
+        # if passed as the "data_source" parameter for single-mod updates
+        uuid = uuid
+        directory_path = Path(mod_directory)
         directory_name = str(directory_path.name)
         # Use this to trigger invalid clause intentionally, i.e. when handling exceptions
         data_malformed = None
         # Any pfid parsed will be stored here locally
         pfid = None
-        # Generate a UUID for the directory we are populating
-        uuid = str(uuid4())
         # Look for a case-insensitive "About" folder
         invalid_about_folder_path_found = True
         about_folder_name = "About"
-        for temp_file in os.scandir(directory):
+        for temp_file in os.scandir(mod_directory):
             if (
                 temp_file.name.lower() == about_folder_name.lower()
                 and temp_file.is_dir()
@@ -1220,27 +1114,21 @@ class ModParser(QRunnable):
                     break
         # Look for .rsc scenario files to load metadata from if we didn't find About.xml
         if invalid_about_file_path_found:
-            logger.debug(
-                f"No variations of /About/About.xml could be found! Checking for RimWorld scenario to parse (.rsc file)"
-            )
             scenario_rsc_found = None
-            for temp_file in os.scandir(directory):
+            for temp_file in os.scandir(mod_directory):
                 if temp_file.name.lower().endswith(".rsc") and not temp_file.is_dir():
                     scenario_rsc_file = temp_file.name
                     scenario_rsc_found = True
                     break
         # If a mod's folder name is a valid PublishedFileId in SteamDB
-        if steam_db and directory_name in steam_db.keys():
+        if (
+            self.metadata_manager.external_steam_metadata
+            and directory_name in self.metadata_manager.external_steam_metadata.keys()
+        ):
             pfid = directory_name
-            logger.debug(
-                f"Found valid PublishedFileId for dir {directory_name} in SteamDB: {pfid}"
-            )
         # Look for a case-insensitive "PublishedFileId.txt" file if we didn't find a pfid
         elif not pfid and not invalid_about_folder_path_found:
             pfid_file_name = "PublishedFileId.txt"
-            logger.debug(
-                f"Unable to find PublishedFileId for dir {directory_name} in Steam DB. Trying to find a {pfid_file_name} to parse"
-            )
             for temp_file in os.scandir(str((directory_path / about_folder_name))):
                 if (
                     temp_file.name.lower() == pfid_file_name.lower()
@@ -1250,9 +1138,6 @@ class ModParser(QRunnable):
                     pfid_path = str(
                         (directory_path / about_folder_name / pfid_file_name)
                     )
-                    logger.debug(
-                        f"Found a variation of /About/PublishedFileId.txt at: {pfid_path}"
-                    )
                     try:
                         with open(pfid_path, encoding="utf-8-sig") as pfid_file:
                             pfid = pfid_file.read()
@@ -1260,10 +1145,6 @@ class ModParser(QRunnable):
                     except:
                         logger.error(f"Failed to read pfid from {pfid_path}")
                     break
-                else:
-                    logger.debug(
-                        f"No variations of /About/PublishedFileId.txt could be found: {directory}"
-                    )
         # If we were able to find an About.xml, populate mod data...
         if not invalid_about_file_path_found:
             mod_data_path = str((directory_path / about_folder_name / about_file_name))
@@ -1280,21 +1161,25 @@ class ModParser(QRunnable):
                 data_malformed = True
             else:
                 # Case-insensitive `ModMetaData` key.
-                logger.debug("Normalizing top level XML keys")
                 mod_data = {k.lower(): v for k, v in mod_data.items()}
-                logger.debug("Editing XML content")
                 if mod_data.get("modmetadata"):
                     # Initialize our dict from the formatted About.xml metadata
                     mod_metadata = mod_data["modmetadata"]
                     # Case-insensitive metadata keys
-                    logger.debug("Normalizing XML metadata keys")
                     mod_metadata = {k.lower(): v for k, v in mod_metadata.items()}
                     if (  # If we don't have a <name>
                         not mod_metadata.get("name")
-                        and steam_db  # ... try to find it in Steam DB
-                        and steam_db.get(pfid, {}).get("steamName")
+                        and self.metadata_manager.external_steam_metadata  # ... try to find it in Steam DB
+                        and self.metadata_manager.external_steam_metadata.get(
+                            pfid, {}
+                        ).get("steamName")
                     ):
-                        mod_metadata.setdefault("name", steam_db[pfid]["steamName"])
+                        mod_metadata.setdefault(
+                            "name",
+                            self.metadata_manager.external_steam_metadata[pfid][
+                                "steamName"
+                            ],
+                        )
                         # This is so that DB builder shows we do not have local metadata
                         mod_metadata.setdefault("DB_BUILDER_NO_NAME", True)
                     else:
@@ -1361,10 +1246,17 @@ class ModParser(QRunnable):
                         mod_metadata["packageid"] = mod_metadata["packageid"].lower()
                     else:  # ...otherwise, we don't have one from About.xml, and we can check Steam DB...
                         # ...this can be needed if a mod depends on a RW generated packageid via built-in hashing mechanism.
-                        if steam_db and steam_db.get(pfid, {}).get("packageId"):
-                            mod_metadata["packageid"] = steam_db[pfid][
-                                "packageId"
-                            ].lower()
+                        if (
+                            self.metadata_manager.external_steam_metadata
+                            and self.metadata_manager.external_steam_metadata.get(
+                                pfid, {}
+                            ).get("packageId")
+                        ):
+                            mod_metadata["packageid"] = (
+                                self.metadata_manager.external_steam_metadata[pfid][
+                                    "packageId"
+                                ].lower()
+                            )
                         else:
                             mod_metadata.setdefault("packageid", "missing.packageid")
                     # Track pfid if we parsed one earlier
@@ -1397,10 +1289,9 @@ class ModParser(QRunnable):
                             )
                     else:
                         # If no 'Assemblies' directory in the main folder, check in subfolders
-                        logger.debug("Checking subfolders for C# assemblies")
                         subfolder_paths = [
                             str(directory_path / folder)
-                            for folder in os.listdir(directory)
+                            for folder in os.listdir(mod_directory)
                             if os.path.isdir(str(directory_path / folder))
                         ]
                         for subfolder_path in subfolder_paths:
@@ -1416,18 +1307,62 @@ class ModParser(QRunnable):
                                         True  # Tag the mod as containing C# code
                                     )
                     # data_source will be used with setIcon later
-                    mod_metadata["data_source"] = intent
+                    mod_metadata["data_source"] = data_source
                     mod_metadata["folder"] = directory_name
                     # This is overwritten if acf data is parsed for Steam/SteamCMD mods
                     mod_metadata["internal_time_touched"] = int(
-                        os.path.getmtime(directory)
+                        os.path.getmtime(mod_directory)
                     )
-                    mod_metadata["about_xml_path"] = mod_data_path
-                    mod_metadata["path"] = directory
-                    logger.debug(
-                        f"Finished editing XML mod content, adding final content to larger list: {mod_metadata}"
+                    mod_metadata["path"] = mod_directory
+                    mod_metadata["metadata_file_mtime"] = int(
+                        os.path.getmtime(mod_data_path)
                     )
-                    mods[uuid] = mod_metadata
+                    mod_metadata["metadata_file_path"] = mod_data_path
+                    # Grab our mod's publishedfileid
+                    publishedfileid = mod_metadata.get("publishedfileid")
+                    if publishedfileid:
+                        # Get our metadata based on data source
+                        workshop_acf_data = (
+                            self.metadata_manager.workshop_acf_data
+                            if data_source == "workshop"
+                            else self.metadata_manager.steamcmd_acf_data
+                        )
+                        workshop_item_details = workshop_acf_data.get(
+                            "AppWorkshop", {}
+                        ).get("WorkshopItemDetails", {})
+                        workshop_items_installed = workshop_acf_data.get(
+                            "AppWorkshop", {}
+                        ).get("WorkshopItemsInstalled", {})
+                        # Edit our metadata, append values
+                        if (
+                            workshop_item_details.get(publishedfileid, {}).get(
+                                "timetouched"
+                            )
+                            and workshop_item_details.get(publishedfileid, {}).get(
+                                "timetouched"
+                            )
+                            != 0
+                        ):
+                            # The last time SteamCMD/Steam client touched a mod according to its entry
+                            mod_metadata["internal_time_touched"] = int(
+                                workshop_item_details[publishedfileid]["timetouched"]
+                            )
+                        if publishedfileid and workshop_item_details.get(
+                            publishedfileid, {}
+                        ).get("timeupdated"):
+                            # The last time SteamCMD/Steam client updated a mod according to its entry
+                            mod_metadata["internal_time_updated"] = int(
+                                workshop_item_details[publishedfileid]["timeupdated"]
+                            )
+                        if publishedfileid and workshop_items_installed.get(
+                            publishedfileid, {}
+                        ).get("timeupdated"):
+                            # The last time SteamCMD/Steam client updated a mod according to its entry
+                            mod_metadata["internal_time_updated"] = int(
+                                workshop_items_installed[publishedfileid]["timeupdated"]
+                            )
+                    # Assign our metadata to the UUID
+                    metadata[uuid] = mod_metadata
                 else:
                     logger.error(
                         f"Key <modmetadata> does not exist in this data: {mod_data}"
@@ -1449,16 +1384,13 @@ class ModParser(QRunnable):
                 data_malformed = True
             else:
                 # Case-insensitive `savedscenario` key.
-                logger.debug("Normalizing top level XML keys")
                 scenario_data = {k.lower(): v for k, v in scenario_data.items()}
-                logger.debug("Editing XML content")
                 if scenario_data.get("savedscenario", {}).get(
                     "scenario"
                 ):  # If our .rsc metadata has a packageid key
                     # Initialize our dict from the formatted .rsc metadata
                     scenario_metadata = scenario_data["savedscenario"]["scenario"]
                     # Case-insensitive keys.
-                    logger.debug("Normalizing XML metadata keys")
                     scenario_metadata = {
                         k.lower(): v for k, v in scenario_metadata.items()
                     }
@@ -1491,15 +1423,21 @@ class ModParser(QRunnable):
                             f"https://steamcommunity.com/sharedfiles/filedetails/?id={pfid}"
                         )
                     # data_source will be used with setIcon later
-                    scenario_metadata["data_source"] = intent
+                    scenario_metadata["data_source"] = data_source
                     scenario_metadata["folder"] = directory_name
-                    scenario_metadata["path"] = directory
+                    scenario_metadata["path"] = mod_directory
+                    # This is overwritten if acf data is parsed for Steam/SteamCMD mods
+                    scenario_metadata["internal_time_touched"] = int(
+                        os.path.getmtime(mod_directory)
+                    )
+                    scenario_metadata["metadata_file_path"] = scenario_data_path
+                    scenario_metadata["metadata_file_mtime"] = int(
+                        os.path.getmtime(scenario_data_path)
+                    )
                     # Track source & uuid in case metadata becomes detached
                     scenario_metadata["uuid"] = uuid
-                    logger.debug(
-                        f"Finished editing XML scenario content, adding final content to larger list: {scenario_metadata}"
-                    )
-                    mods[uuid] = scenario_metadata
+                    # Assign our metadata to the UUID
+                    metadata[uuid] = scenario_metadata
                 else:
                     logger.error(
                         f"Key <savedscenario><scenario> does not exist in this data: {scenario_metadata}"
@@ -1508,8 +1446,11 @@ class ModParser(QRunnable):
         if (
             invalid_about_file_path_found and not scenario_rsc_found
         ) or data_malformed:  # ...finally, if we don't have any metadata parsed, populate invalid mod entry for visibility
-            logger.debug(f"Invalid dir. Populating invalid mod for path: {directory}")
-            mods[uuid] = {
+            logger.debug(
+                f"Invalid dir. Populating invalid mod for path: {mod_directory}"
+            )
+            # Assign our metadata to the UUID
+            metadata[uuid] = {
                 "invalid": True,
                 "name": "Invalid item",
                 "packageid": "invalid.item",
@@ -1519,34 +1460,42 @@ class ModParser(QRunnable):
                     + "\n\nThis mod does NOT contain an ./About/About.xml and is likely leftover from previous usage."
                     + "\n\nThis can happen sometimes with Steam mods if there are leftover .dds textures or unexpected data."
                 ),
-                "data_source": intent,
+                "data_source": data_source,
                 "folder": directory_name,
-                "path": directory,
+                "path": mod_directory,
+                # This is overwritten if acf data is parsed for Steam/SteamCMD mods
+                "internal_time_touched": int(os.path.getmtime(mod_directory)),
                 "uuid": uuid,
             }
             if pfid:
-                mods[uuid].update({"publishedfileid": pfid})
+                metadata[uuid].update({"publishedfileid": pfid})
         # Additional checks for local mods
-        if intent == "local":
-            metadata = mods[uuid]
+        if data_source == "local":
+            local_mod_metadata = metadata[uuid]
             # Check for git repository inside local mods, tag appropriately
             if os.path.exists(str((directory_path / ".git"))):
-                metadata["git_repo"] = True
+                local_mod_metadata["git_repo"] = True
             # Check for local mods that are SteamCMD mods, tag appropriately
-            if metadata.get("folder") == metadata.get("publishedfileid"):
-                metadata["steamcmd"] = True
-        logger.debug(f"Finished parsing directory")
-        return mods
+            if local_mod_metadata.get("folder") == local_mod_metadata.get(
+                "publishedfileid"
+            ):
+                local_mod_metadata["steamcmd"] = True
+        return metadata
 
     def run(self):
         try:
-            mod_metadata = self.__parse_mod_data(
-                self.directory, self.intent, self.steam_db
+            mod_metadata = self.__parse_mod_metadata(
+                self.data_source, self.mod_directory, self.metadata_manager, self.uuid
             )
-            self.results.update(mod_metadata)
+            packageid = mod_metadata[self.uuid].get("packageid")
+            self.metadata_manager.internal_local_metadata.update(mod_metadata)
+            # Track packageid -> uuid relationships for future uses
+            self.metadata_manager.packageid_to_uuids.setdefault(packageid, set()).add(
+                self.uuid
+            )
         except Exception as e:
             error_message = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-            logger.error(error_message)
+            logger.error(f"ERROR: Unable to initialize ModParser {error_message}")
 
 
 # Mod helper functions
@@ -1569,8 +1518,10 @@ def add_dependency_to_mod(
 
         # If the value is a single dict (for moddependencies)
         if isinstance(dependency_or_dependency_ids, dict):
-            if dependency_or_dependency_ids.get("packageId") and not isinstance(
-                dependency_or_dependency_ids["packageId"], list
+            if (
+                dependency_or_dependency_ids.get("packageId")
+                and not isinstance(dependency_or_dependency_ids["packageId"], list)
+                and not isinstance(dependency_or_dependency_ids["packageId"], dict)
             ):
                 # if dependency_id in all_mods:
                 # ^ dependencies are required regardless of whether they are in all_mods

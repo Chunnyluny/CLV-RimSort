@@ -32,19 +32,10 @@ from github import Github
 from pyperclip import copy as copy_to_clipboard
 from PySide6.QtCore import QEventLoop, QProcess, Qt, Slot
 from PySide6.QtWidgets import (
-    QApplication,
     QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
-)
-from github import Github
-from pygit2 import (
-    Repository,
-    RemoteCallbacks,
-    GitError,
-    init_repository,
-    clone_repository,
 )
 from pyperclip import copy as copy_to_clipboard
 from requests import get as requests_get
@@ -64,7 +55,6 @@ from app.utils.generic import (
 )
 from app.utils.metadata import *
 from app.utils.rentry.wrapper import RentryUpload, RentryImport
-from app.utils.schema import validate_rimworld_mods_list
 from app.utils.steam.browser import SteamBrowser
 from app.utils.steam.steamcmd.wrapper import SteamcmdInterface
 from app.utils.steam.steamworks.wrapper import (
@@ -74,7 +64,7 @@ from app.utils.steam.steamworks.wrapper import (
 from app.utils.steam.webapi.wrapper import CollectionImport
 from app.utils.todds.wrapper import ToddsInterface
 from app.utils.xml import json_to_xml_write, xml_path_to_json
-from app.views.actions_panel import Actions
+
 from app.views.game_configuration_panel import GameConfiguration
 from app.views.mod_info_panel import ModInfo
 from app.views.mods_panel import ModsPanel, ModsPanelSortKey
@@ -132,9 +122,14 @@ class MainContent(QObject):
                 self._do_export_list_clipboard
             )
             EventBus().do_export_mod_list_to_rentry.connect(self._do_upload_list_rentry)
-
+            EventBus().do_upload_community_rules_db_to_github.connect(
+                self._on_do_upload_community_db_to_github
+            )
             EventBus().do_download_community_rules_db_from_github.connect(
                 self._on_do_download_community_db_from_github
+            )
+            EventBus().do_upload_steam_workshop_db_to_github.connect(
+                self._on_do_upload_steam_workshop_db_to_github
             )
             EventBus().do_download_steam_workshop_db_from_github.connect(
                 self._on_do_download_steam_workshop_db_from_github
@@ -166,6 +161,29 @@ class MainContent(QObject):
                 lambda: self.actions_slot("reset_steamcmd_acf_data")
             )
             EventBus().do_install_steamcmd.connect(self._do_setup_steamcmd)
+            EventBus().do_edit_run_arguments.connect(self._do_edit_run_args)
+
+            EventBus().do_refresh_mods_lists.connect(self._do_refresh)
+            EventBus().do_clear_active_mods_list.connect(self._do_clear)
+            EventBus().do_restore_active_mods_list.connect(self._do_restore)
+            EventBus().do_sort_active_mods_list.connect(self._do_sort)
+            EventBus().do_save_active_mods_list.connect(self._do_save)
+            EventBus().do_run_game.connect(self._do_run_game)
+
+            # Download Menu bar Eventbus
+            EventBus().do_add_git_mod.connect(self._do_add_git_mod)
+            EventBus().do_browse_workshop.connect(self._do_browse_workshop)
+            EventBus().do_check_for_workshop_updates.connect(
+                self._do_check_for_workshop_updates
+            )
+
+            # Textures Menu bar Eventbus
+            EventBus().do_optimize_textures.connect(
+                lambda: self.actions_slot("optimize_textures")
+            )
+            EventBus().do_delete_dds_textures.connect(
+                lambda: self.actions_slot("delete_textures")
+            )
 
             # INITIALIZE WIDGETS
             # Initialize Steam(CMD) integraations
@@ -177,9 +195,7 @@ class MainContent(QObject):
             )
 
             # Initialize MetadataManager
-            self.metadata_manager = MetadataManager.instance(
-                settings_controller=self.settings_controller
-            )
+            self.metadata_manager = MetadataManager.instance()
             self.metadata_manager.update_game_configuration_signal.connect(
                 self.__update_game_configuration
             )
@@ -201,22 +217,25 @@ class MainContent(QObject):
             self.mods_panel = ModsPanel(
                 settings_controller=self.settings_controller,
             )
-            self.actions_panel = Actions()
 
             # WIDGETS INTO BASE LAYOUT
             self.main_layout.addLayout(self.mod_info_panel.panel, 50)
             self.main_layout.addLayout(self.mods_panel.panel, 50)
-            self.main_layout.addLayout(self.actions_panel.panel)
 
             # SIGNALS AND SLOTS
-            self.actions_panel.actions_signal.connect(self.actions_slot)  # Actions
+            self.metadata_manager.mod_created_signal.connect(
+                self.mods_panel.on_mod_created  # Connect MetadataManager to ModPanel for mod creation
+            )
+            self.metadata_manager.mod_deleted_signal.connect(
+                self.mods_panel.on_mod_deleted  # Connect MetadataManager to ModPanel for mod deletion
+            )
+            self.metadata_manager.mod_metadata_updated_signal.connect(
+                self.mods_panel.on_mod_metadata_updated  # Connect MetadataManager to ModPanel for mod metadata updates
+            )
             GameConfiguration.instance().configuration_signal.connect(self.actions_slot)
             GameConfiguration.instance().settings_panel.actions_signal.connect(
                 self.actions_slot
             )  # Settings
-            self.mods_panel.list_updated_signal.connect(
-                self.__do_save_animation
-            )  # Save btn animation
             self.mods_panel.active_mods_list.key_press_signal.connect(
                 self.__handle_active_mod_key_press
             )
@@ -264,6 +283,7 @@ class MainContent(QObject):
             self.mods_panel.active_mods_list.refresh_signal.connect(self._do_refresh)
             self.mods_panel.inactive_mods_list.refresh_signal.connect(self._do_refresh)
             # Restore cache initially set to empty
+            self.active_mods_uuids_last_save: list[str] = []
             self.active_mods_uuids_restore_state: list[str] = []
             self.inactive_mods_uuids_restore_state: list[str] = []
 
@@ -431,8 +451,8 @@ class MainContent(QObject):
             f"Finished inserting mod data into active [{len(active_mods_uuids)}] and inactive [{len(inactive_mods_uuids)}] mod lists"
         )
         # Recalculate warnings for both lists
-        self.mods_panel.active_mods_list.recalculate_warnings_signal.emit()
-        self.mods_panel.inactive_mods_list.recalculate_warnings_signal.emit()
+        # self.mods_panel.active_mods_list.recalculate_warnings_signal.emit()
+        # self.mods_panel.inactive_mods_list.recalculate_warnings_signal.emit()
 
     def __duplicate_mods_prompt(self) -> None:
         list_of_duplicate_mods = "\n".join(
@@ -488,35 +508,9 @@ class MainContent(QObject):
         complete json mod info for that internal uuid. It passes
         this information to the mod info panel to display.
 
-        It updates the styling of the summary values based
-        on the validity of the mod, and will highlight red if invalid.
-
         :param uuid: uuid of mod
         """
-        mod_info = self.metadata_manager.internal_local_metadata.get(uuid)
-        self.mod_info_panel.display_mod_info(mod_info=mod_info)
-        if mod_info and mod_info.get("invalid"):
-            # Set invalid value style
-            for widget in (
-                self.mod_info_panel.mod_info_name_value,
-                self.mod_info_panel.mod_info_path_value,
-                self.mod_info_panel.mod_info_author_value,
-                self.mod_info_panel.mod_info_package_id_value,
-            ):
-                widget.setObjectName("summaryValueInvalid")
-                widget.style().unpolish(widget)
-                widget.style().polish(widget)
-        else:
-            # Set valid value style
-            for widget in (
-                self.mod_info_panel.mod_info_name_value,
-                self.mod_info_panel.mod_info_path_value,
-                self.mod_info_panel.mod_info_author_value,
-                self.mod_info_panel.mod_info_package_id_value,
-            ):
-                widget.setObjectName("summaryValue")
-                widget.style().unpolish(widget)
-                widget.style().polish(widget)
+        self.mod_info_panel.display_mod_info(uuid=uuid)
 
     def __update_game_configuration(self) -> None:
         self.metadata_manager.community_rules_repo = (
@@ -571,7 +565,7 @@ class MainContent(QObject):
                 )
             )
         )
-
+        self.active_mods_uuids_last_save = active_mods_uuids
         if is_initial:
             logger.info("Caching initial active/inactive mod lists")
             self.active_mods_uuids_restore_state = active_mods_uuids
@@ -975,29 +969,20 @@ class MainContent(QObject):
         """
         Refresh expensive calculations & repopulate lists with that refreshed data
         """
+        EventBus().refresh_started.emit()
+        EventBus().do_save_button_animation_stop.emit()
         # If we are refreshing cache from user action
         if not is_initial:
             self.mods_panel.list_updated = False
-            # Stop the refresh button from blinking if it is blinking
-            if self.actions_panel.refresh_button_flashing_animation.isActive():
-                self.actions_panel.refresh_button_flashing_animation.stop()
-                self.actions_panel.refresh_button.setObjectName("")
-                self.actions_panel.refresh_button.style().unpolish(
-                    self.actions_panel.refresh_button
-                )
-                self.actions_panel.refresh_button.style().polish(
-                    self.actions_panel.refresh_button
-                )
-            # Stop the save button from blinking if it is blinking
-            if self.actions_panel.save_button_flashing_animation.isActive():
-                self.actions_panel.save_button_flashing_animation.stop()
-                self.actions_panel.save_button.setObjectName("")
-                self.actions_panel.save_button.style().unpolish(
-                    self.actions_panel.save_button
-                )
-                self.actions_panel.save_button.style().polish(
-                    self.actions_panel.save_button
-                )
+            # Reset the data source filters to default and clear searches
+            self.mods_panel.active_mods_filter_data_source_index = len(
+                self.mods_panel.data_source_filter_icons
+            )
+            self.mods_panel.signal_clear_search(list_type="Active")
+            self.mods_panel.inactive_mods_filter_data_source_index = len(
+                self.mods_panel.data_source_filter_icons
+            )
+            self.mods_panel.signal_clear_search(list_type="Inactive")
             self.mods_panel.active_mods_filter_data_source_index = len(
                 self.mods_panel.data_source_filter_icons
             )
@@ -1055,14 +1040,7 @@ class MainContent(QObject):
             logger.debug(
                 "Essential paths have not been set. Passing refresh and resetting mod lists"
             )
-
-    def _do_refresh_animation(self, path: str) -> None:
-        logger.debug(f"File change detected: {path}")
-        if not self.actions_panel.refresh_button_flashing_animation.isActive():
-            logger.debug("Starting refresh button animation")
-            self.actions_panel.refresh_button_flashing_animation.start(
-                500
-            )  # blink every 500 milliseconds
+        EventBus().refresh_finished.emit()
 
     def _do_clear(self) -> None:
         """
@@ -1325,32 +1303,22 @@ class MainContent(QObject):
                             continue  # Append `_steam` suffix if Steam mod, continue to next mod
                     active_mods.append(package_id)
             logger.info(f"Collected {len(active_mods)} active mods for export")
-            logger.info("Getting current ModsConfig.xml to use as a reference format")
-            mods_config_path = str(
-                (
-                    Path(self.settings_controller.settings.config_folder)
-                    / "ModsConfig.xml"
-                )
-            )
-            package_ids_from_file = validate_rimworld_mods_list(
-                xml_path_to_json(mods_config_path)
-            )
-            if package_ids_from_file:
+            mods_config_data = {"ModsConfigData": {"activeMods": {"li": active_mods}}}
+            try:
                 logger.info(
-                    "Successfully got ModsConfig.xml data. Overwriting with current active mods"
-                )
-                mods_config_data = {
-                    "ModsConfigData": {"activeMods": {"li": active_mods}}
-                }
-                logger.info(
-                    f"Saving generated ModsConfig.xml to selected path: {file_path}"
+                    f"Saving generated ModsConfig.xml style list to selected path: {file_path}"
                 )
                 if not file_path.endswith(".xml"):
                     json_to_xml_write(mods_config_data, file_path + ".xml")
                 else:
                     json_to_xml_write(mods_config_data, file_path)
-            else:
-                logger.error("Could not export active mods")
+            except:
+                show_fatal_error(
+                    title="Failed to export to file",
+                    text="Failed to export active mods to file:",
+                    information=f"{file_path}",
+                    details=traceback.format_exc(),
+                )
         else:
             logger.debug("USER ACTION: pressed cancel, passing")
 
@@ -1743,47 +1711,23 @@ class MainContent(QObject):
                         continue  # Append `_steam` suffix if Steam mod, continue to next mod
                 active_mods.append(package_id)
         logger.info(f"Collected {len(active_mods)} active mods for saving")
+
+        mods_config_data = {"ModsConfigData": {"activeMods": {"li": active_mods}}}
         mods_config_path = str(
-            (Path(self.settings_controller.settings.config_folder) / "ModsConfig.xml")
+            Path(self.settings_controller.settings.config_folder) / "ModsConfig.xml"
         )
-        package_ids_from_file = validate_rimworld_mods_list(
-            xml_path_to_json(mods_config_path)
-        )
-        if package_ids_from_file:
-            logger.info(
-                "Successfully got ModsConfig.xml data. Overwriting with current active mods"
-            )
-            mods_config_data = {"ModsConfigData": {"activeMods": {"li": active_mods}}}
+        try:
             json_to_xml_write(mods_config_data, mods_config_path)
-        else:
+        except:
             logger.error("Could not save active mods")
             show_fatal_error(
-                text="Could not save active mods",
-                details=f"Failed to save active mods to {mods_config_path}",
-                information="Please report this error!",
+                title="Could not save active mods",
+                text="Failed to save active mods to file:",
+                information=f"{mods_config_path}",
+                details=traceback.format_exc(),
             )
-        # Stop the save button from blinking if it is blinking
-        if self.actions_panel.save_button_flashing_animation.isActive():
-            self.actions_panel.save_button_flashing_animation.stop()
-            self.actions_panel.save_button.setObjectName("")
-            self.actions_panel.save_button.style().unpolish(
-                self.actions_panel.save_button
-            )
-            self.actions_panel.save_button.style().polish(
-                self.actions_panel.save_button
-            )
+        EventBus().do_save_button_animation_stop.emit()
         logger.info("Finished saving active mods")
-
-    def __do_save_animation(self) -> None:
-        logger.debug("Active mods list updated")
-        if (
-            self.mods_panel.list_updated  # This will only evaluate True if this is initialization, or _do_refresh()
-            and not self.actions_panel.save_button_flashing_animation.isActive()  # No need to re-enable if it's already blinking
-        ):
-            logger.debug("Starting save button animation")
-            self.actions_panel.save_button_flashing_animation.start(
-                500
-            )  # Blink every 500 milliseconds
 
     def _do_restore(self) -> None:
         """
@@ -3148,6 +3092,13 @@ class MainContent(QObject):
         )
 
     @Slot()
+    def _on_do_upload_community_db_to_github(self) -> None:
+        self._do_upload_db_to_repo(
+            repo_url=self.settings_controller.settings.external_community_rules_repo,
+            file_name="communityRules.json",
+        )
+
+    @Slot()
     def _on_do_download_community_db_from_github(self) -> None:
         if GIT_EXISTS:
             self._do_clone_repo_to_path(
@@ -3156,6 +3107,13 @@ class MainContent(QObject):
             )
         else:
             self._do_notify_no_git()
+
+    @Slot()
+    def _on_do_upload_steam_workshop_db_to_github(self) -> None:
+        self._do_upload_db_to_repo(
+            repo_url=self.settings_controller.settings.external_steam_metadata_repo,
+            file_name="steamDB.json",
+        )
 
     @Slot()
     def _on_do_download_steam_workshop_db_from_github(self) -> None:
@@ -3183,3 +3141,15 @@ class MainContent(QObject):
     @Slot()
     def _on_do_build_steam_workshop_database(self) -> None:
         self._do_build_database_thread()
+
+    @Slot()
+    def _do_run_game(self) -> None:
+        self._do_steamworks_api_call(
+            [
+                "launch_game_process",
+                [
+                    self.settings_controller.settings.game_folder,
+                    self.settings_controller.settings.run_args,
+                ],
+            ]
+        )
