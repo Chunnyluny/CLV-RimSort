@@ -1,7 +1,7 @@
+import json
 import os
 from enum import Enum
 from functools import partial
-import json
 from pathlib import Path
 from shutil import copy2, copytree, rmtree
 from traceback import format_exc
@@ -33,7 +33,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from loguru import logger
-from pyperclip import copy as copy_to_clipboard
 
 from app.controllers.settings_controller import SettingsController
 from app.models.dialogue import (
@@ -45,7 +44,9 @@ from app.utils.app_info import AppInfo
 from app.utils.constants import SEARCH_DATA_SOURCE_FILTER_INDEXES
 from app.utils.event_bus import EventBus
 from app.utils.generic import (
+    copy_to_clipboard_safely,
     delete_files_except_extension,
+    delete_files_only_extension,
     handle_remove_read_only,
     open_url_browser,
     platform_specific_open,
@@ -662,6 +663,8 @@ class ModListWidget(QListWidget):
             delete_mod_action = None
             # Delete mod (keep .dds)
             delete_mod_keep_dds_action = None
+            # Delete optimized textures (.dds files only)
+            delete_mod_dds_only_action = None
 
             # Get all selected QListWidgetItems
             selected_items = self.selectedItems()
@@ -784,6 +787,10 @@ class ModListWidget(QListWidget):
                     delete_mod_action.setText("Delete mod")
                     delete_mod_keep_dds_action = QAction()
                     delete_mod_keep_dds_action.setText("Delete mod (keep .dds)")
+                    delete_mod_dds_only_action = QAction()
+                    delete_mod_dds_only_action.setText(
+                        "Delete optimized textures (.dds files only)"
+                    )
             # Multiple items selected
             elif len(selected_items) > 1:  # Multiple items selected
                 for source_item in selected_items:
@@ -892,6 +899,12 @@ class ModListWidget(QListWidget):
                             delete_mod_keep_dds_action.setText(
                                 "Delete mod(s) (keep .dds)"
                             )
+                        if not delete_mod_dds_only_action:
+                            delete_mod_dds_only_action = QAction()
+                            # Delete mod action text
+                            delete_mod_dds_only_action.setText(
+                                "Delete optimized textures (.dds files only)"
+                            )
             # Put together our contextMenu
             if open_folder_action:
                 contextMenu.addAction(open_folder_action)
@@ -901,12 +914,18 @@ class ModListWidget(QListWidget):
                 contextMenu.addAction(open_mod_steam_action)
             if toggle_warning_action:
                 contextMenu.addAction(toggle_warning_action)
-            if delete_mod_action or delete_mod_keep_dds_action:
+            if (
+                delete_mod_action
+                or delete_mod_keep_dds_action
+                or delete_mod_dds_only_action
+            ):
                 deletion_options_menu = QMenu(title="Deletion options")
                 if delete_mod_action:
                     deletion_options_menu.addAction(delete_mod_action)
                 if delete_mod_keep_dds_action:
                     deletion_options_menu.addAction(delete_mod_keep_dds_action)
+                if delete_mod_dds_only_action:
+                    deletion_options_menu.addAction(delete_mod_dds_only_action)
                 contextMenu.addMenu(deletion_options_menu)
             contextMenu.addSeparator()
             if (
@@ -1288,6 +1307,35 @@ class ModListWidget(QListWidget):
                                         extension=".dds",
                                     )
                     return True
+                elif action == delete_mod_dds_only_action:  # ACTION: Delete mods action
+                    answer = show_dialogue_conditional(
+                        title="Are you sure?",
+                        text=f"You have selected {len( selected_items )} mods to Delete optimized textures (.dds files only)",
+                        information="\nThis operation will only delete optimized textures (.dds files only) from mod files."
+                        + "\nDo you want to proceed?",
+                    )
+                    if answer == "&Yes":
+                        for source_item in selected_items:
+                            if type(source_item) is QListWidgetItem:
+                                item_data = source_item.data(Qt.UserRole)
+                                uuid = item_data["uuid"]
+                                mod_metadata = (
+                                    self.metadata_manager.internal_local_metadata[uuid]
+                                )
+                                if not mod_metadata[
+                                    "data_source"  # Disallow Official Expansions
+                                ] == "expansion" or not mod_metadata[
+                                    "packageid"
+                                ].startswith(
+                                    "ludeon.rimworld"
+                                ):
+                                    data = source_item.data(Qt.UserRole)
+                                    self.uuids.remove(data["uuid"])
+                                    delete_files_only_extension(
+                                        directory=mod_metadata["path"],
+                                        extension=".dds",
+                                    )
+                    return True
                 # Execute action for each selected mod
                 for source_item in selected_items:
                     if type(source_item) is QListWidgetItem:
@@ -1343,7 +1391,7 @@ class ModListWidget(QListWidget):
                         elif (
                             action == copy_packageId_to_clipboard_action
                         ):  # ACTION: Copy packageId to clipboard
-                            copy_to_clipboard(mod_metadata["packageid"])
+                            copy_to_clipboard_safely(mod_metadata["packageid"])
                         elif (
                             action == copy_url_to_clipboard_action
                         ):  # ACTION: Copy URL to clipboard
@@ -1367,7 +1415,7 @@ class ModListWidget(QListWidget):
                                         "url", mod_metadata.get("steam_url")
                                     )
                                 if url:
-                                    copy_to_clipboard(url)
+                                    copy_to_clipboard_safely(url)
                         # Edit mod rules action
                         elif action == edit_mod_rules_action:
                             self.edit_rules_signal.emit(
