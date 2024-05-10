@@ -1,12 +1,10 @@
 import datetime
-from functools import partial
-from gc import collect
-from pathlib import Path
 import platform
 import subprocess
 import sys
 import webbrowser
 from functools import partial
+from gc import collect
 from io import BytesIO
 from math import ceil
 from multiprocessing import cpu_count, Pool
@@ -31,7 +29,6 @@ except ImportError:
 from github import Github
 from PySide6.QtCore import QEventLoop, QProcess, Qt, Slot
 from PySide6.QtWidgets import (
-    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -62,7 +59,7 @@ from app.utils.steam.steamworks.wrapper import (
 )
 from app.utils.steam.webapi.wrapper import CollectionImport
 from app.utils.todds.wrapper import ToddsInterface
-from app.utils.xml import json_to_xml_write, xml_path_to_json
+from app.utils.xml import json_to_xml_write
 
 from app.views.mod_info_panel import ModInfo
 from app.views.mods_panel import ModsPanel, ModsPanelSortKey
@@ -92,7 +89,9 @@ class MainContent(QObject):
             cls._instance = super(MainContent, cls).__new__(cls)
         return cls._instance
 
-    def __init__(self, settings_controller: SettingsController) -> None:
+    def __init__(
+        self, settings_controller: SettingsController, version_string: str
+    ) -> None:
         """
         Initialize the main content panel.
 
@@ -103,8 +102,9 @@ class MainContent(QObject):
             logger.debug("Initializing MainContent")
 
             self.settings_controller = settings_controller
-            EventBus().settings_have_changed.connect(self._on_settings_have_changed)
+            self.version_string = version_string
 
+            EventBus().settings_have_changed.connect(self._on_settings_have_changed)
             EventBus().do_check_for_application_update.connect(
                 self._do_check_for_update
             )
@@ -168,6 +168,11 @@ class MainContent(QObject):
             EventBus().do_sort_active_mods_list.connect(self._do_sort)
             EventBus().do_save_active_mods_list.connect(self._do_save)
             EventBus().do_run_game.connect(self._do_run_game)
+
+            # Edit Menu bar Eventbus
+            EventBus().do_rule_editor.connect(
+                lambda: self.actions_slot("open_community_rules_with_rule_editor")
+            )
 
             # Download Menu bar Eventbus
             EventBus().do_add_git_mod.connect(self._do_add_git_mod)
@@ -1322,9 +1327,12 @@ class MainContent(QObject):
             logger.debug("USER ACTION: pressed cancel, passing")
 
     def _do_import_list_rentry(self) -> None:
+        # Create an instance of RentryImport
         rentry_import = RentryImport()
+        # Open the RentryImport dialogue
+        rentry_import.import_rentry_link()
         # Exit if user cancels or no package IDs
-        if rentry_import.exec() != QDialog.Accepted or not rentry_import.package_ids:
+        if not rentry_import.package_ids:
             logger.debug("USER ACTION: pressed cancel or no package IDs, passing")
             return
         # Clear Active and Inactive search and data source filter
@@ -1373,12 +1381,14 @@ class MainContent(QObject):
             self.__missing_mods_prompt()
 
     def _do_import_list_workshop_collection(self) -> None:
+        # Create an instance of collection_import
         collection_import = CollectionImport(metadata_manager=self.metadata_manager)
+
+        # Trigger the import dialogue and get the result
+        collection_import.import_collection_link()
+
         # Exit if user cancels or no package IDs
-        if (
-            collection_import.exec() != QDialog.Accepted
-            or not collection_import.package_ids
-        ):
+        if not collection_import.package_ids:
             logger.debug("USER ACTION: pressed cancel or no package IDs, passing")
             return
         # Clear Active and Inactive search and data source filter
@@ -2183,7 +2193,7 @@ class MainContent(QObject):
             repo_folder_name = os.path.split(repo_url)[1]
             # Calculate path from generated folder name
             repo_path = str((Path(base_path) / repo_folder_name))
-            if os.path.exists(repo_path):  # If local repo does exists
+            if os.path.exists(repo_path):  # If local repo does exist
                 # Prompt to user to handle
                 answer = show_dialogue_conditional(
                     title="Existing repository found",
@@ -2199,7 +2209,7 @@ class MainContent(QObject):
                         "Update existing",
                     ],
                 )
-                if answer == "&Cancel":
+                if answer == "Cancel":
                     logger.debug(
                         f"User cancelled prompt. Skipping any {repo_folder_name} repository actions."
                     )
@@ -2529,8 +2539,6 @@ class MainContent(QObject):
     def _do_open_rule_editor(
         self, compact: bool, initial_mode=str, packageid=None
     ) -> None:
-        if GameConfiguration.instance().settings_panel.isVisible():
-            GameConfiguration.instance().settings_panel.close()  # Close this if we came from game configuration
         self.rule_editor = RuleEditor(
             # Initialization options
             compact=compact,
@@ -2609,9 +2617,6 @@ class MainContent(QObject):
             self.settings_controller.settings.save()
 
     def _do_build_database_thread(self) -> None:
-        # If settings panel is still open, close it.
-        if GameConfiguration.instance().settings_panel.isVisible():
-            GameConfiguration.instance().settings_panel.close()
         # Prompt user file dialog to choose/create new DB
         logger.info("Opening file dialog to specify output file")
         output_path = show_dialogue_file(
@@ -2720,9 +2725,6 @@ class MainContent(QObject):
             self._do_refresh()
 
     def _do_download_entire_workshop(self, action: str) -> None:
-        # If settings panel is still open, close it.
-        if GameConfiguration.instance().settings_panel.isVisible():
-            GameConfiguration.instance().settings_panel.close()
         # DB Builder is used to run DQ and grab entirety of
         # any available Steam Workshop PublishedFileIDs
         self.db_builder = SteamDatabaseBuilder(

@@ -7,12 +7,12 @@ from time import time
 from typing import Any, Dict, Optional, Tuple
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QDialog, QLineEdit, QMessageBox, QPushButton, QVBoxLayout
 from loguru import logger
 from requests import post as requests_post
 from requests.exceptions import JSONDecodeError
 from steam.webapi import WebAPI
 
+from app.models.dialogue import show_dialogue_input, show_warning
 from app.utils.app_info import AppInfo
 from app.utils.constants import RIMWORLD_DLC_METADATA
 from app.utils.generic import chunks
@@ -29,31 +29,44 @@ BASE_URL_STEAMFILES = "https://steamcommunity.com/sharedfiles/filedetails/?id="
 BASE_URL_WORKSHOP = "https://steamcommunity.com/workshop/filedetails/?id="
 
 
-class CollectionImport(QDialog):
+class CollectionImport:
+    """
+    Class to handle importing workshop collection links and extracting package IDs.
+    """
+
     def __init__(self, metadata_manager):
-        super().__init__()
+        """
+        Initialize the CollectionImport instance.
+
+        Args:
+            metadata_manager: The metadata manager instance.
+        """
         self.metadata_manager = metadata_manager
-        self.package_ids: list[str] = []  # Initialize an empty list to store packageids
+        self.package_ids: list[str] = (
+            []
+        )  # Initialize an empty list to store package IDs
         self.publishedfileids: list[str] = []  # Initialize an empty list to store pfids
         self.input_dialog()  # Call the input_dialog method to set up the UI
 
     def input_dialog(self):
         # Initialize the UI for entering collection links
-        logger.info("Workshop collection link Input UI initializing")
-        self.setWindowTitle("Add Workshop collection link")
-
-        layout = QVBoxLayout(self)
-
-        self.link_input = QLineEdit(self)
-        layout.addWidget(self.link_input)
-
-        self.import_collection_link_button = QPushButton("Import collection", self)
-        self.import_collection_link_button.clicked.connect(self.import_collection_link)
-        layout.addWidget(self.import_collection_link_button)
+        self.link_input = show_dialogue_input(
+            title="Add Workshop collection link",
+            text="Add Workshop collection link",
+        )
+        self.import_collection_link()
         logger.info("Workshop collection link Input UI initialized successfully!")
 
     def is_valid_collection_link(self, link):
-        # Check if the provided link is a valid workshop collection link
+        """
+        Check if the provided link is a valid workshop collection link.
+
+        Args:
+            link: The collection link to validate.
+
+        Returns:
+            bool: True if the link is valid, False otherwise.
+        """
         return link.startswith(BASE_URL) and (
             BASE_URL_STEAMFILES in link or BASE_URL_WORKSHOP in link
         )
@@ -61,7 +74,7 @@ class CollectionImport(QDialog):
     def import_collection_link(self):
         # Handle the import button click event
         logger.info("Import Workshop collection clicked")
-        collection_link = self.link_input.text()
+        collection_link = self.link_input[0]
         steamdb = (
             self.metadata_manager.external_steam_metadata
             if self.metadata_manager
@@ -71,22 +84,24 @@ class CollectionImport(QDialog):
         # Check if the input link is a valid workshop collection link
         if not self.is_valid_collection_link(collection_link):
             logger.error(
-                "Invalid Workshop collection link. Please enter a valid collection link."
+                "Invalid Workshop collection link. Please enter a valid Workshop collection link."
             )
-            # Show an error message box
-            error_message = "Invalid Workshop collection link. Please enter a valid collection link."
-            QMessageBox.critical(self, "Invalid Link", error_message)
+            # Show warning message box
+            show_warning(
+                title="Invalid Link",
+                text="Invalid Workshop collection link. Please enter a valid Workshop collection link.",
+            )
             return
 
         # Check if there is a steamdb supplied
         if not steamdb:
-            error_message = "Cannot import collection without a SteamDB supplied."
-            logger.error(error_message)
-            # Show an error message box
-            QMessageBox.critical(
-                self,
-                "Cannot import collection without SteamDB supplied! Please configure Steam Workshop Database in settings.",
-                error_message,
+            logger.error(
+                "Cannot import collection without SteamDB supplied! Please configure Steam Workshop Database in settings."
+            )
+            # Show warning message box
+            show_warning(
+                title="Invalid Database",
+                text="Cannot import collection without SteamDB supplied! Please configure Steam Workshop Database in settings.",
             )
             return
 
@@ -114,9 +129,6 @@ class CollectionImport(QDialog):
             logger.error(
                 f"An error occurred while fetching collection content: {str(e)}"
             )
-
-        # Close the dialog after processing the link
-        self.accept()
 
 
 class DynamicQuery(QObject):
@@ -319,102 +331,125 @@ class DynamicQuery(QObject):
             chunks_processed += chunk_total
             # Uncomment to see the pfids from each chunk
             # logger.debug(f"{chunk_total} PublishedFileIds in chunk: {chunk}")
-            response = self.api.call(
-                method_path="IPublishedFileService.GetDetails",
-                key=self.apikey,
-                publishedfileids=chunk,
-                includetags=False,
-                includeadditionalpreviews=False,
-                includechildren=True,
-                includekvtags=True,
-                includevotes=False,
-                short_description=False,
-                includeforsaledata=False,
-                includemetadata=True,
-                return_playtime_stats=0,
-                appid=self.appid,
-                strip_description_bbcode=False,
-                includereactions=False,
-                admin_query=False,
-            )
-            for metadata in response["response"]["publishedfiledetails"]:
-                publishedfileid = metadata[
-                    "publishedfileid"
-                ]  # Set the PublishedFileId to that of the metadata we are parsing
+            try:
+                response = self.api.call(
+                    method_path="IPublishedFileService.GetDetails",
+                    key=self.apikey,
+                    publishedfileids=chunk,
+                    includetags=False,
+                    includeadditionalpreviews=False,
+                    includechildren=True,
+                    includekvtags=True,
+                    includevotes=False,
+                    short_description=False,
+                    includeforsaledata=False,
+                    includemetadata=True,
+                    return_playtime_stats=0,
+                    appid=self.appid,
+                    strip_description_bbcode=False,
+                    includereactions=False,
+                    admin_query=False,
+                )
+                for metadata in response["response"]["publishedfiledetails"]:
+                    publishedfileid = metadata[
+                        "publishedfileid"
+                    ]  # Set the PublishedFileId to that of the metadata we are parsing
 
-                # Uncomment this to view the metadata being parsed in real time
-                # logger.debug(f"{publishedfileid}: {metadata}")
-                # If the mod is no longer published
-                if metadata["result"] != 1:
-                    if not result["database"].get(
-                        publishedfileid
-                    ):  # If we don't already have a ["database"] entry for this pfid
-                        result["database"][publishedfileid] = {}
-                    logger.debug(
-                        f"Tried to parse metadata for a mod that is deleted/private/removed/unposted: {publishedfileid}"
-                    )
-                    result["database"][publishedfileid]["unpublished"] = True
-                    # If mod is unpublished, it has no metadata.
-                    continue  # We are done with this publishedfileid
-                else:
-                    # This case is mostly intended for any missing_children passed back thru
-                    # If this is part of an AppIDQuery, then it is useful for population of
-                    # child_name and/or child_url below as part of the dependency data being collected
-                    if not result["database"].get(
-                        publishedfileid
-                    ):  # If we don't already have a ["database"] entry for this pfid
-                        result["database"][publishedfileid] = {}  # Add in skeleton data
-                    # We populate the data
-                    result["database"][publishedfileid]["steamName"] = metadata["title"]
-                    result["database"][publishedfileid][
-                        "url"
-                    ] = f"https://steamcommunity.com/sharedfiles/filedetails/?id={publishedfileid}"
-                    # Track time publishing created
-                    # result["database"][publishedfileid][
-                    #     "external_time_created"
-                    # ] = metadata["time_created"]
-                    # # Track time publishing last updated
-                    # result["database"][publishedfileid][
-                    #     "external_time_updated"
-                    # ] = metadata["time_updated"]
-                    result["database"][publishedfileid]["dependencies"] = {}
-                    # If the publishing has listed mod dependencies
-                    if metadata.get("children"):
-                        for children in metadata[
-                            "children"
-                        ]:  # Check if children present in database
-                            child_pfid = children["publishedfileid"]
-                            if result["database"].get(
-                                child_pfid
-                            ):  # If we have data for this child already cached
-                                if not result["database"][child_pfid].get(
-                                    "unpublished"
-                                ):  # ... and the mod is published, populate it
-                                    if result["database"][child_pfid].get(
-                                        "name"
-                                    ):  # Use local name over Steam name if possible
-                                        child_name = result["database"][child_pfid][
+                    # Uncomment this to view the metadata being parsed in real time
+                    # logger.debug(f"{publishedfileid}: {metadata}")
+                    # If the mod is no longer published
+                    if metadata["result"] != 1:
+                        if not result["database"].get(
+                            publishedfileid
+                        ):  # If we don't already have a ["database"] entry for this pfid
+                            result["database"][publishedfileid] = {}
+                        logger.debug(
+                            f"Tried to parse metadata for a mod that is deleted/private/removed/unposted: {publishedfileid}"
+                        )
+                        result["database"][publishedfileid]["unpublished"] = True
+                        # If mod is unpublished, it has no metadata.
+                        continue  # We are done with this publishedfileid
+                    else:
+                        # This case is mostly intended for any missing_children passed back thru
+                        # If this is part of an AppIDQuery, then it is useful for population of
+                        # child_name and/or child_url below as part of the dependency data being collected
+                        if not result["database"].get(
+                            publishedfileid
+                        ):  # If we don't already have a ["database"] entry for this pfid
+                            result["database"][
+                                publishedfileid
+                            ] = {}  # Add in skeleton data
+                        # We populate the data
+                        result["database"][publishedfileid]["steamName"] = metadata[
+                            "title"
+                        ]
+                        result["database"][publishedfileid][
+                            "url"
+                        ] = f"https://steamcommunity.com/sharedfiles/filedetails/?id={publishedfileid}"
+                        # Track time publishing created
+                        # result["database"][publishedfileid][
+                        #     "external_time_created"
+                        # ] = metadata["time_created"]
+                        # # Track time publishing last updated
+                        # result["database"][publishedfileid][
+                        #     "external_time_updated"
+                        # ] = metadata["time_updated"]
+                        result["database"][publishedfileid]["dependencies"] = {}
+                        # If the publishing has listed mod dependencies
+                        if metadata.get("children"):
+                            for children in metadata[
+                                "children"
+                            ]:  # Check if children present in database
+                                child_pfid = children["publishedfileid"]
+                                if result["database"].get(
+                                    child_pfid
+                                ):  # If we have data for this child already cached
+                                    if not result["database"][child_pfid].get(
+                                        "unpublished"
+                                    ):  # ... and the mod is published, populate it
+                                        if result["database"][child_pfid].get(
                                             "name"
-                                        ]
-                                    elif result["database"][child_pfid].get(
-                                        "steamName"
-                                    ):
-                                        child_name = result["database"][child_pfid][
+                                        ):  # Use local name over Steam name if possible
+                                            child_name = result["database"][child_pfid][
+                                                "name"
+                                            ]
+                                        elif result["database"][child_pfid].get(
                                             "steamName"
+                                        ):
+                                            child_name = result["database"][child_pfid][
+                                                "steamName"
+                                            ]
+                                        else:  # This is a stub value used in-memory only (hopefully)
+                                            # and is intended for AppIdQuery first pass
+                                            child_name = "UNKNOWN"
+                                        child_url = result["database"][child_pfid][
+                                            "url"
                                         ]
-                                    else:  # This is a stub value used in-memory only (hopefully)
-                                        # and is intended for AppIdQuery first pass
-                                        child_name = "UNKNOWN"
-                                    child_url = result["database"][child_pfid]["url"]
-                                    result["database"][publishedfileid]["dependencies"][
-                                        child_pfid
-                                    ] = [child_name, child_url]
-                            else:  # Child was not found in database, track it's pfid for later
-                                if child_pfid not in missing_children:
-                                    logger.debug(
-                                        f"Could not find pfid {child_pfid} in database. Adding child to missing_children"
-                                    )
-                                    missing_children.append(child_pfid)
+                                        result["database"][publishedfileid][
+                                            "dependencies"
+                                        ][child_pfid] = [child_name, child_url]
+                                else:  # Child was not found in database, track it's pfid for later
+                                    if child_pfid not in missing_children:
+                                        logger.debug(
+                                            f"Could not find pfid {child_pfid} in database. Adding child to missing_children"
+                                        )
+                                        missing_children.append(child_pfid)
+            except Exception as e:
+                stacktrace = traceback.format_exc()
+                if (
+                    e.__class__.__name__ == "HTTPError"
+                    or e.__class__.__name__ == "SSLError"
+                ):  # requests.exceptions.HTTPError OR urllib3.exceptions.SSLError
+                    # If an HTTPError from steam/urllib3 module(s) somehow is uncaught,
+                    # try to remove the Steam API key from the stacktrace
+                    pattern = "&key="
+                    stacktrace = stacktrace[
+                        : len(stacktrace)
+                        - (len(stacktrace) - (stacktrace.find(pattern) + len(pattern)))
+                    ]
+                logger.error(
+                    f"IPublishedFileService/GetDetails errored querying batch [{chunks_processed}/{total}]: {stacktrace}"
+                )
             self.dq_messaging_signal.emit(
                 f"IPublishedFileService/GetDetails chunk [{chunks_processed}/{total}]"
             )
